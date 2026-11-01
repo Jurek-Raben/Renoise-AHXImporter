@@ -1,0 +1,72 @@
+# Builds the Renoise tool package (.xrnx) on every push/merge to main.
+# The package is a zip of the *contents* of ai.claude.AHXImporter.xrnx/ (manifest.xml at the zip root).
+# It is uploaded as a workflow artifact and attached to a GitHub release named after the manifest version.
+
+name: Build xrnx
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      TOOL_DIR: ai.claude.AHXImporter.xrnx
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Strip development-only code
+        # Removes everything between "-- @build:skip-start" and "-- @build:skip-end" (inclusive) from all Lua files.
+        run: |
+          find "$TOOL_DIR" -name '*.lua' -print0 | xargs -0 sed -i '/-- @build:skip-start/,/-- @build:skip-end/d'
+          if grep -rn '@build:skip' "$TOOL_DIR" --include='*.lua'; then
+            echo "Unbalanced @build:skip markers" >&2
+            exit 1
+          fi
+
+      - name: Syntax check (LuaJIT)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq luajit
+          find "$TOOL_DIR" -name '*.lua' -print0 | xargs -0 -n1 luajit -bl > /dev/null
+
+      - name: Read version from manifest
+        id: meta
+        run: |
+          id=$(sed -n 's:.*<Id>\(.*\)</Id>.*:\1:p' "$TOOL_DIR/manifest.xml")
+          version=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' "$TOOL_DIR/manifest.xml")
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "file=${id}_v${version}.xrnx" >> "$GITHUB_OUTPUT"
+
+      - name: Package xrnx
+        run: |
+          mkdir -p dist
+          cd "$TOOL_DIR"
+          zip -r -X "../dist/${{ steps.meta.outputs.file }}" . -x '.DS_Store' '*/.DS_Store' 'preferences.xml'
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.id }}_v${{ steps.meta.outputs.version }}
+          path: dist/${{ steps.meta.outputs.file }}
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ steps.meta.outputs.version }}
+          FILE: dist/${{ steps.meta.outputs.file }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            # Same manifest version: replace the package of the existing release.
+            gh release upload "$TAG" "$FILE" --clobber
+          else
+            gh release create "$TAG" "$FILE" --target "$GITHUB_SHA" --title "AHX Importer $TAG" --generate-notes
+          fi

@@ -1,0 +1,143 @@
+-- Import workflow: pick or receive a file, parse it, ask for the import options, create a new song and build it
+-- sliced with a progress dialog.
+
+local Parser = require('ahx.parser')
+local Timing = require('ahx.timing')
+local InstrumentWriter = require('importer.instrument_writer')
+local PatternWriter = require('importer.pattern_writer')
+local ProcessSlicer = require('importer.process_slicer')
+local SongCreator = require('importer.song_creator')
+local SongSetup = require('importer.song_setup')
+local OptionsDialog = require('importer.ui.options_dialog')
+local Util = require('importer.util')
+
+local Controller = {}
+
+---Builds the whole song. Runs inside the process slicer.
+---@param song AhxSong
+---@param file_name string
+---@param options AhxImportOptions
+---@return table summary
+local function build_song(song, file_name, options)
+  local rns = renoise.song()
+  rns:describe_undo('Import AHX Song')
+
+  ProcessSlicer.step('Preparing song', true)
+  SongSetup.prepare()
+  rns.name = song.name
+  rns.comments = { ('Imported from %s (THX%d) by %s'):format(file_name, song.revision, Util.TOOL_NAME) }
+
+  local unsupported = {}
+  local function report(name)
+    unsupported[name] = (unsupported[name] or 0) + 1
+  end
+
+  local plan = Timing.plan(song)
+  if not plan.exact then
+    report('speed combination (rows approximated)')
+  end
+  local variant_phrases = InstrumentWriter.write_all(song, plan, report, options)
+  local summary = PatternWriter.write_song(song, 0, plan, report, variant_phrases)
+  summary.unsupported = unsupported
+
+  rns.selected_instrument_index = 1
+  rns.selected_sequence_index = 1
+  return summary
+end
+
+---@param song AhxSong
+---@param summary table
+local function report(song, summary)
+  local lines = {}
+  for name, count in pairs(summary.unsupported) do
+    lines[#lines + 1] = ('  %s: %dx'):format(name, count)
+  end
+  table.sort(lines)
+
+  Util.log(
+    '"%s": %d instruments, %d patterns, sequence length %d, loop to %s',
+    song.name,
+    song.instrument_count,
+    summary.patterns,
+    summary.sequence_length,
+    tostring(summary.loop_to)
+  )
+  if summary.truncated then
+    Util.log('Sequence truncated at the Renoise limit')
+  end
+  if #lines > 0 then
+    Util.log('Not converted yet:\n%s', table.concat(lines, '\n'))
+  end
+
+  renoise.app():show_status(
+    ('AHX import: "%s" – %d instruments, %d patterns%s'):format(
+      song.name,
+      song.instrument_count,
+      summary.patterns,
+      #lines > 0 and ' (some commands not converted yet, see scripting console)' or ''
+    )
+  )
+end
+
+---Imports an AHX file into a new song.
+---@param file_name string
+---@return boolean success the file is a valid AHX file and the import was started
+function Controller.import_file(file_name)
+  if ProcessSlicer.is_running() then
+    renoise.app():show_warning('An AHX import is still running.')
+    return false
+  end
+
+  local song, parse_error = Parser.parse_file(file_name)
+  if not song then
+    renoise.app():show_error('AHX import failed:\n' .. tostring(parse_error))
+    return false
+  end
+
+  OptionsDialog.show(song, file_name, function(options)
+    Controller.build(song, file_name, options)
+  end)
+  return true
+end
+
+---Creates the new song and builds it.
+---@param song AhxSong
+---@param file_name string
+---@param options AhxImportOptions
+function Controller.build(song, file_name, options)
+  SongCreator.create(function()
+    -- Song objects die when the document is replaced during the sliced build; stop instead of failing halfway.
+    local song_replaced = false
+    local new_document_observable = renoise.tool().app_new_document_observable
+    local function on_new_document()
+      song_replaced = true
+      ProcessSlicer.cancel()
+    end
+    new_document_observable:add_notifier(on_new_document)
+
+    ProcessSlicer.run('Importing AHX Song', true, build_song, function(ok, result)
+      if new_document_observable:has_notifier(on_new_document) then
+        new_document_observable:remove_notifier(on_new_document)
+      end
+      if ok then
+        report(song, result)
+      elseif song_replaced then
+        renoise.app():show_error('AHX import stopped: the song was replaced while importing. Please import again.')
+      elseif result == ProcessSlicer.CANCELLED then
+        renoise.app():show_status('AHX import cancelled')
+      else
+        renoise.app():show_error('AHX import failed:\n' .. tostring(result))
+      end
+    end, song, file_name, options)
+  end)
+end
+
+---Asks for a file and imports it.
+function Controller.start()
+  local file_name = renoise.app():prompt_for_filename_to_read({ 'ahx', 'thx' }, 'Import AHX Song')
+  if file_name ~= '' then
+    Controller.import_file(file_name)
+  end
+end
+
+return Controller
