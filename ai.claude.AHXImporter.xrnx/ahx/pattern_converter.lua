@@ -20,6 +20,7 @@ local FULL_VOLUME = 0x40
 ---@class AhxCell
 ---@field note integer|nil
 ---@field note_off boolean|nil
+---@field legato boolean|nil retrigger of a note without instrument (AHX keeps the instrument running)
 ---@field delay_frames integer|nil frames after the row start (note delay, note cut, hard cut); placed by `convert`
 ---@field vibrato { amount: integer, first_sub: integer }|nil 0Vxy from sub line `first_sub` on; placed by `convert`
 ---@field instrument integer|nil
@@ -188,9 +189,12 @@ function PatternConverter:convert_step(channel, step, transpose, next_instrument
   elseif note then
     cell.note = note
     if instrument == 0 and state.note and state.instrument > 0 then
-      -- AHX changes the pitch without retriggering the instrument.
-      -- ASSUMPTION: 0GFF glides instantly, i.e. changes the pitch without a retrigger.
-      add_effect(cell, '0G', 0xff)
+      -- AHX changes the pitch without retriggering the instrument. A pattern glide (0GFF) fought with the absolute
+      -- pitches of the phrase whenever the phrase switches samples (distorted sound with PWM, syphus - galactic
+      -- olympics AHX 3 / instrument 07), so the note is retriggered with the instrument; the phrase of the new note
+      -- starts from its beginning. The note volume and the running vibrato stay as in AHX.
+      cell.instrument = state.instrument - 1
+      cell.legato = true
     end
     state.note = note
   elseif instrument > 0 then
@@ -293,7 +297,7 @@ end
 ---@param cell AhxCell
 ---@param state table channel state
 function PatternConverter:add_vibrato(cell, state)
-  if cell.instrument then
+  if cell.instrument and not cell.legato then
     local instrument = self.song.instruments[cell.instrument + 1]
     state.vibrato = {
       depth = instrument.vibrato_depth,

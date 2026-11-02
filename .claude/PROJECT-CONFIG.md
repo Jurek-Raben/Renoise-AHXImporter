@@ -178,7 +178,7 @@ become patterns and the pattern sequence.
   Maximizer with threshold -0.5 dB.
 - Every import starts with the options dialog: sample interpolation (none / linear / cubic / sinc, default none) and
   sample resolution (8 / 16 / 32 bit, default 8) and sample rate (8363 / 16726 / 33452 Hz = 1× / 2× / 4×, default
-  1×; higher rates repeat every frame, so waveform, pitch and 0Sxx offsets stay the same).
+  4×; higher rates repeat every frame, so waveform, pitch and 0Sxx offsets stay the same).
   Rendering Original / Smoothed / Band-limited (default Smoothed, by ear): Original repeats every frame (sample and
   hold, like Paula); Smoothed interpolates between the frames (Catmull-Rom, wrapping around the loop); Band-limited
   (`ahx/band_limit.lua`) resynthesizes each cycle from its harmonics below 18 kHz at the highest pitch the sample is
@@ -208,5 +208,7 @@ become patterns and the pattern sequence.
 - Keyzones keep "Vel->Vol" enabled: extra samples use velocity range 0..0, which is then never triggered.
 - Pitch slides (1xx/2xx/3xx/5xx): AHX period steps per frame are converted to semitones at the current note;
   Renoise 0U/0D slide by xx/32 semitones per tick, 0G glides by xx/64 semitones per tick (both verified by ear).
-- A note without instrument changes the pitch without retrigger (0GFF); an instrument without note retriggers at the
-  current pitch.
+- A note without instrument is retriggered with the channel's current instrument (AHX only changes the pitch; a 0GFF
+  glide fought with the absolute phrase pitches and sounded distorted with PWM, syphus - galactic olympics); the note
+  volume and the running vibrato stay. Those notes get phrases too (`NoteUsage`). An instrument without note
+  retriggers at the current pitch.

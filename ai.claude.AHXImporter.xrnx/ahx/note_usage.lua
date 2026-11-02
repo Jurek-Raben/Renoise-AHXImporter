@@ -32,20 +32,29 @@ end
 ---@return table<integer, AhxInstrumentUsage> usage by AHX instrument number
 function NoteUsage.scan(song)
   local plain, variants = {}, {}
+  -- Notes without instrument are retriggered with the channel's current instrument (see `PatternConverter`), so they
+  -- need phrases too. The current instrument is followed through the position list in order (jumps ignored).
+  local current = { [0] = 0, 0, 0, 0 }
   for position = 0, song.position_count - 1 do
     local entry = song.positions[position]
     for channel = 0, 3 do
       local steps = song.tracks[entry.track[channel]]
       for row = 0, song.track_length - 1 do
         local step = steps and steps[row]
-        if step and step.instrument > 0 and step.note > 0 then
+        local instrument = step and step.instrument or 0
+        if instrument > 0 then
+          current[channel] = instrument
+        elseif step and step.note > 0 and step.fx ~= 0x3 and step.fx ~= 0x5 and current[channel] > 0 then
+          instrument = current[channel]
+        end
+        if instrument > 0 and step.note > 0 then
           local note = NoteUsage.renoise_note(step, entry.transpose[channel])
           if step.fx == 0x9 then
-            variants[step.instrument] = variants[step.instrument] or {}
-            variants[step.instrument][step.fx_param .. ':' .. note] = { note = note, square_offset = step.fx_param }
+            variants[instrument] = variants[instrument] or {}
+            variants[instrument][step.fx_param .. ':' .. note] = { note = note, square_offset = step.fx_param }
           else
-            plain[step.instrument] = plain[step.instrument] or {}
-            plain[step.instrument][note] = true
+            plain[instrument] = plain[instrument] or {}
+            plain[instrument][note] = true
           end
         end
       end
