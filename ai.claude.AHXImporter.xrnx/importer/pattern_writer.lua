@@ -3,6 +3,7 @@
 local PatternConverter = require('ahx.pattern_converter')
 local Sequence = require('ahx.sequence')
 local Timing = require('ahx.timing')
+local MacroWriter = require('importer.macro_writer')
 local ProcessSlicer = require('importer.process_slicer')
 local SongSetup = require('importer.song_setup')
 
@@ -16,8 +17,6 @@ local function write_track(pattern_track, cells)
     local column = line.note_columns[1]
     if cell.note then
       column.note_value = cell.note
-    elseif cell.note_off then
-      column.note_value = 120
     end
     if cell.instrument then
       column.instrument_value = cell.instrument
@@ -50,15 +49,41 @@ end
 ---@param subsong integer
 ---@param plan AhxTimingPlan
 ---@param report fun(name: string) collects commands that are not converted (yet)
----@param variant_phrases table<integer, table<string, integer>> variant phrase index by instrument and variant key
----@param lines_per_row integer pattern lines per AHX row (pattern resolution option)
----@param trigger_keys table<string, string> variant key by trigger id (`NoteUsage.from_triggers`)
+---@param build table results of the instrument stage:
+---  variant_phrases: variant phrase index by AHX instrument and variant key,
+---  lines_per_row: pattern lines per AHX row (pattern resolution option),
+---  trigger_keys: variant key by trigger id (`NoteUsage.from_triggers`),
+---  slots: Renoise instrument per channel and AHX instrument (one instance per track, `InstrumentSlots`),
+---  filters: Renoise filter per Renoise instrument index (`FilterWriter`),
+---  filter_sides: Renoise-filter side per AHX instrument number
 ---@return table summary { patterns, sequence_length, loop_to, truncated }
-function PatternWriter.write_song(song, subsong, plan, report, variant_phrases, lines_per_row, trigger_keys)
+function PatternWriter.write_song(song, subsong, plan, report, build)
+  local lines_per_row, filters = build.lines_per_row, build.filters
   local rns = renoise.song()
   local sequencer = rns.sequencer
   local sequence = Sequence.build(song, subsong)
-  local converter = PatternConverter.new(song, plan, report, variant_phrases, lines_per_row, trigger_keys)
+  local converter = PatternConverter.new(
+    song,
+    plan,
+    report,
+    build.variant_phrases,
+    lines_per_row,
+    build.trigger_keys,
+    build.slots,
+    build.filter_sides
+  )
+  local macro_writer = MacroWriter.new(filters)
+  -- The macro devices of a track follow the order of its instruments (`InstrumentSlots`): created before the patterns.
+  for channel = 1, SongSetup.CHANNEL_COUNT do
+    local indices = {}
+    for _, index in pairs(build.slots[channel] or {}) do
+      indices[#indices + 1] = index
+    end
+    table.sort(indices)
+    for _, index in ipairs(indices) do
+      macro_writer:device(channel, index, report)
+    end
+  end
 
   local lpb, tpl = Timing.for_speed(plan, Timing.INITIAL_SPEED, lines_per_row)
   rns.transport.bpm = plan.bpm
@@ -86,6 +111,8 @@ function PatternWriter.write_song(song, subsong, plan, report, variant_phrases, 
       pattern.number_of_lines = data.number_of_lines
       for channel = 1, SongSetup.CHANNEL_COUNT do
         write_track(pattern:track(channel), data.channels[channel])
+        macro_writer:write_volumes(pattern:track(channel), channel, data.volumes[channel], report)
+        macro_writer:write_cutoffs(pattern:track(channel), channel, data.cutoffs[channel], report)
       end
       pattern_by_key[data.key] = pattern_index
       pattern_count = pattern_count + 1

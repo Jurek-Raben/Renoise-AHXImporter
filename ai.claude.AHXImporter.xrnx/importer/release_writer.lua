@@ -1,11 +1,8 @@
--- Adds a volume AHDSR (full level until note-off, then release) to an instrument, for one of two purposes:
---   * Hard cut release (`HardCutRelease`): the note-off the pattern writes before the next trigger releases over the
---     hard cut frames.
---   * PWM crossfade (import option): with new note action "note off", every sample switch of a phrase releases the
---     old sample over a few ms while the new one fades in with the same attack, which smooths the switches.
--- The hard cut release wins: with "note off" its long release let old notes fade underneath and modulated the volume
--- (syphus - better days, bass on AHX 1), so those instruments keep "note cut" without crossfade.
+-- PWM crossfade (import option): a volume AHDSR with attack = release = the crossfade time and new note action
+-- "note off", so every sample switch of a phrase releases the old sample over a few ms while the new one fades in.
+-- (The hard cut release of AHX instruments is part of the volume automation, see `PatternConverter:advance_volume`.)
 
+local ModulationSets = require('importer.modulation_sets')
 local Util = require('importer.util')
 
 local ReleaseWriter = {}
@@ -47,10 +44,7 @@ end
 ---@param release_ms number
 ---@param purpose string for the console
 local function write(target, attack_ms, release_ms, purpose)
-  if #target.sample_modulation_sets == 0 then
-    target:insert_sample_modulation_set_at(1)
-  end
-  local modulation_set = target.sample_modulation_sets[1]
+  local modulation_set = ModulationSets.first(target)
   local path = ahdsr_device_path(modulation_set)
   if not path then
     error('no AHDSR modulation device available')
@@ -71,25 +65,12 @@ local function write(target, attack_ms, release_ms, purpose)
   Util.log('%s: %s -> %s', target.name, purpose, Util.describe_parameters(ahdsr))
 end
 
----Adds the hard cut release or the PWM crossfade; failures are reported instead of stopping the import. Returns true
----when the crossfade was written.
+---Adds the PWM crossfade; failures are reported instead of stopping the import. Returns true when it was written.
 ---@param target renoise.Instrument
----@param instrument AhxInstrument
----@param frames_per_second number
 ---@param crossfade_ms number PWM crossfade from the import options (0 = off)
 ---@param report fun(name: string)
 ---@return boolean crossfaded
-function ReleaseWriter.write(target, instrument, frames_per_second, crossfade_ms, report)
-  if instrument.hard_cut_release ~= 0 and instrument.hard_cut_release_frames > 0 then
-    local release_ms = instrument.hard_cut_release_frames * 1000 / frames_per_second
-    local ok, message = pcall(write, target, 0, release_ms, ('hard cut release %d ms'):format(release_ms))
-    if not ok then
-      Util.log('%s: hard cut release not written: %s', target.name, tostring(message))
-      report('hard cut release (AHDSR setup failed, see log)')
-    end
-    return false
-  end
-
+function ReleaseWriter.write(target, crossfade_ms, report)
   if crossfade_ms <= 0 then
     return false
   end
@@ -115,9 +96,7 @@ function ReleaseWriter.write_start_set(target, samples, report)
     return
   end
   local ok, message = pcall(function()
-    local index = #target.sample_modulation_sets + 1
-    target:insert_sample_modulation_set_at(index)
-    local modulation_set = target.sample_modulation_sets[index]
+    local modulation_set, index = ModulationSets.take(target)
     modulation_set:copy_from(target.sample_modulation_sets[1])
     modulation_set.name = 'Note start'
     for _, device in ipairs(modulation_set.devices) do

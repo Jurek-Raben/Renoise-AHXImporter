@@ -1,6 +1,8 @@
 -- Creates Renoise instruments from AHX instruments: one sample per waveform state of the simulated notes, and one
 -- phrase per triggered note that plays it frame by frame (sample switches, pitch, envelope volume). Triggers with a
--- square offset (9xx) or a following pitch slide get extra variant phrases.
+-- square offset (9xx) or a following pitch slide get extra variant phrases. Every instrument is loaded from a template
+-- whose macro 1 ("Volume") is mapped to the volume input of all modulation sets: the pattern automates the volume
+-- (see `PatternConverter:advance_volume`, `MacroWriter`).
 
 local FilterPath = require('ahx.filter_path')
 local PhraseBuilder = require('ahx.phrase_builder')
@@ -8,13 +10,20 @@ local Simulator = require('ahx.simulator')
 local WaveStates = require('ahx.wave_states')
 local Waves = require('ahx.waves')
 local FilterWriter = require('importer.filter_writer')
+local ModulationSets = require('importer.modulation_sets')
 local PhraseWriter = require('importer.phrase_writer')
 local ProcessSlicer = require('importer.process_slicer')
 local ReleaseWriter = require('importer.release_writer')
 local SampleWriter = require('importer.sample_writer')
 local Util = require('importer.util')
+local XrniWriter = require('importer.xrni_writer')
 
 local InstrumentWriter = {}
+
+-- Macro of the instrument template that controls the volume (automated by the pattern, see `MacroWriter`).
+local VOLUME_MACRO = 1
+-- Macro of the template that controls the cutoff of instruments on the Renoise-filter path.
+local CUTOFF_MACRO = 2
 
 -- Default instrument volume: four full-scale chip voices easily clip the master otherwise.
 local INSTRUMENT_VOLUME_DB = -6
@@ -131,25 +140,20 @@ end
 ---@field key string
 ---@field state_index integer
 ---@field fine_index integer
----@field phrase AhxPhraseData first phrase that uses the sample
 ---@field first boolean copy for the phrase's first line (no fade-in)
 ---@field top_note integer highest note the sample is played at (band limit)
 
----Distinct sample keys (waveform state + fine tune) of all phrases, in order of first use. With `per_phrase`, every
----phrase gets samples of its own (the Renoise-filter path needs a cutoff envelope per note). With `separate_first`,
----the sample of a phrase's first line is a copy of its own (marked `first`), so the PWM crossfade can leave the note
----start without fade-in.
+---Distinct sample keys (waveform state + fine tune) of all phrases, in order of first use. With `separate_first`, the
+---sample of a phrase's first line is a copy of its own (marked `first`), so the PWM crossfade can leave the note start
+---without fade-in.
 ---@param phrases AhxPhraseData[]
 ---@param variants { data: AhxPhraseData }[]
----@param per_phrase boolean
 ---@param separate_first boolean
 ---@param per_octave boolean band-limited rendering: one sample per octave of the played note
 ---@return AhxSampleKey[]
-local function collect_sample_keys(phrases, variants, per_phrase, separate_first, per_octave)
+local function collect_sample_keys(phrases, variants, separate_first, per_octave)
   local keys, by_key = {}, {}
-  local phrase_number = 0
   local function collect(data)
-    phrase_number = phrase_number + 1
     local current = nil
     for index = 1, data.number_of_lines do
       local line = data.lines[index]
@@ -158,9 +162,6 @@ local function collect_sample_keys(phrases, variants, per_phrase, separate_first
           -- A glide keeps the playing sample (no retrigger).
           line.sample_key = current.key
         else
-          if per_phrase then
-            line.sample_key = line.state_index .. ':' .. line.fine_index .. '#' .. phrase_number
-          end
           if per_octave then
             line.sample_key = line.sample_key .. '@' .. math.floor(line.note / 12)
           end
@@ -174,7 +175,6 @@ local function collect_sample_keys(phrases, variants, per_phrase, separate_first
               key = line.sample_key,
               state_index = line.state_index,
               fine_index = line.fine_index,
-              phrase = data,
               first = first,
               top_note = line.note,
             }
@@ -196,16 +196,43 @@ local function collect_sample_keys(phrases, variants, per_phrase, separate_first
   return keys
 end
 
----Fills an empty Renoise instrument with an AHX instrument.
+---Every used modulation set must still be mapped (sets get copied with `copy_from`): checked by the number of mappings
+---of each mapped macro.
 ---@param target renoise.Instrument
+---@param report fun(name: string)
+local function check_mappings(target, report)
+  local sets = #target.sample_modulation_sets
+  for _, number in ipairs({ VOLUME_MACRO, CUTOFF_MACRO }) do
+    local instrument_macro = target:macro(number)
+    local mappings = #instrument_macro.mappings
+    if mappings > 0 and mappings < sets then
+      Util.log('%s: macro "%s" mapped to %d of %d modulation sets', target.name, instrument_macro.name, mappings, sets)
+      report('macro mapping missing on some modulation sets (see log)')
+    end
+    -- The template names each macro like the input it maps to (see `XrniWriter` for the parameter indices).
+    if mappings > 0 and instrument_macro:mapping(1).parameter.name ~= instrument_macro.name then
+      Util.log(
+        '%s: macro "%s" is mapped to "%s"',
+        target.name,
+        instrument_macro.name,
+        instrument_macro:mapping(1).parameter.name
+      )
+      report('macro mapped to an unexpected parameter (see log)')
+    end
+  end
+end
+
+---Writes an AHX instrument into the Renoise instrument slot of the same number (the slot is replaced by the template).
 ---@param song AhxSong
 ---@param number integer AHX instrument number (1-based like in AHX)
+---@param slot_index integer Renoise instrument index to write to (see `InstrumentSlots`)
 ---@param plan AhxTimingPlan
 ---@param usage AhxInstrumentUsage
 ---@param report fun(name: string)
 ---@param options AhxImportOptions
 ---@return table<string, integer> variant phrase index by variant key
-function InstrumentWriter.write(target, song, number, plan, usage, report, options)
+---@return AhxFilterSetup|nil filter Renoise filter of the instrument
+function InstrumentWriter.write(song, number, slot_index, plan, usage, report, options)
   local instrument = song.instruments[number]
   local variant_count = #usage.variants
   usage = fit_phrases(usage)
@@ -218,13 +245,9 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
     simulations[#simulations + 1] = Simulator.run(song, instrument, { square_offset = offset })
     simulation_by_offset[offset] = #simulations
   end
-  -- Renoise-filter path: a one-sided filter sweep without other sample changes is done by the Renoise filter, so the
-  -- states are collected unfiltered (see `FilterPath`).
-  local slides = false
-  for _, variant in ipairs(usage.variants) do
-    slides = slides or variant.slides ~= nil
-  end
-  local filter_side = FilterPath.analyze(simulations, instrument.wave_length, slides)
+  -- Renoise-filter path: a one-sided filter sweep is done by the Renoise filter (cutoff automated per frame through
+  -- macro 2), so the states are collected unfiltered (see `FilterPath`).
+  local filter_side = FilterPath.analyze(simulations)
   local state_set = WaveStates.collect(simulations, instrument.wave_length, filter_side ~= nil)
   local frames_per_second = 50 * plan.speed_multiplier
   if filter_side then
@@ -240,18 +263,12 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
   while true do
     phrases, variants =
       build_phrases(simulations, state_set, simulation_by_offset, usage, frames_per_second, fine_steps)
-    -- The PWM crossfade only matters for phrases that switch samples; instruments with hard cut release keep their
-    -- own release (see `ReleaseWriter`).
+    -- The PWM crossfade only matters for phrases that switch samples.
     crossfade_ms = 0
-    if
-      options.crossfade_ms > 0
-      and not filter_side
-      and not (instrument.hard_cut_release ~= 0 and instrument.hard_cut_release_frames > 0)
-      and phrases_switch_samples(phrases, variants)
-    then
+    if options.crossfade_ms > 0 and phrases_switch_samples(phrases, variants) then
       crossfade_ms = options.crossfade_ms
     end
-    sample_keys = collect_sample_keys(phrases, variants, filter_side ~= nil, crossfade_ms > 0, per_octave)
+    sample_keys = collect_sample_keys(phrases, variants, crossfade_ms > 0, per_octave)
     if #sample_keys <= WaveStates.MAX_STATES then
       break
     end
@@ -274,7 +291,12 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
     report('fine pitch resolution reduced (too many waveform states)')
   end
 
-  target:clear()
+  -- The template needs a modulation set for every set the writers may take: set 1 and the note start set.
+  local macros = { [VOLUME_MACRO] = { name = 'Volume', parameter = XrniWriter.VOLUME, value = 1 } }
+  if filter_side then
+    macros[CUTOFF_MACRO] = { name = 'Cutoff', parameter = XrniWriter.CUTOFF, value = filter_side == 'low' and 1 or 0 }
+  end
+  local target = XrniWriter.load(slot_index, { set_count = 2, macros = macros })
   target.name = name
   target.volume = math.db2lin(INSTRUMENT_VOLUME_DB)
 
@@ -299,8 +321,9 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
     end
     -- sample.fine_tune has 128 steps per semitone (verified).
     sample.fine_tune = math.floor(key.fine_index * FINE_TUNE_PER_SEMITONE / fine_steps + 0.5)
-    -- The note volume is the channel volume of the pattern (0Mxx), the envelope comes from the phrase.
+    -- The volume comes from the automated volume macro (modulation set 1 or the sample's own set).
     sample.volume = 1
+    sample.modulation_set_index = 1
 
     -- The phrase selects the samples. From the keyboard without phrase, only the first state plays: the others use
     -- velocity 0..0, which is not triggered as long as "Vel->Vol" stays enabled in the keyzone.
@@ -330,11 +353,12 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
   end
 
   local variant_index = PhraseWriter.write(target, phrases, variants, plan.phrase_lpb, name)
+  ModulationSets.first(target)
 
   if state_set.filter_step > 1 then
     report('filter resolution reduced (more than 255 waveform states)')
   end
-  if ReleaseWriter.write(target, instrument, frames_per_second, crossfade_ms, report) then
+  if ReleaseWriter.write(target, crossfade_ms, report) then
     local first_samples = {}
     for index, key in ipairs(sample_keys) do
       if key.first then
@@ -342,49 +366,55 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
       end
     end
     ReleaseWriter.write_start_set(target, first_samples, report)
-  elseif options.crossfade_ms > 0 and instrument.hard_cut_release ~= 0 and instrument.hard_cut_release_frames > 0 then
-    report('PWM crossfade (skipped for instruments with hard cut release)')
   end
+  ModulationSets.trim(target)
+  local filter = nil
   if filter_side then
-    for index, key in ipairs(sample_keys) do
-      local phrase = key.phrase
-      local envelope = FilterPath.envelope(simulations[phrase.simulation_index], filter_side, phrase.note)
-      FilterWriter.write(
-        target,
-        target.samples[index],
-        filter_side,
-        envelope,
-        frames_per_second,
-        options.filter_resonance,
-        report,
-        index == 1
-      )
-      ProcessSlicer.step(('Instrument %02d: filter %d of %d'):format(number, index, #sample_keys))
-    end
+    filter = FilterWriter.write(target, filter_side, options.filter_resonance, report)
   end
-  return variant_index
+  check_mappings(target, report)
+  return variant_index, filter
 end
 
----Writes all instruments of an AHX song into the current Renoise song. AHX instrument n becomes Renoise instrument n;
----the song's existing first instrument is reused, so no empty slots are left.
+---Writes the instruments of an AHX song into the current Renoise song in the layout of `InstrumentSlots`: grouped by
+---track behind an empty separator instrument, one instance per track (the first instance of an AHX instrument is
+---built, the others are copies), unused instruments last. The song's existing first instrument is reused.
 ---@param song AhxSong
 ---@param plan AhxTimingPlan
 ---@param report fun(name: string) collects features that are not converted (yet)
 ---@param options AhxImportOptions
 ---@param usage table<integer, AhxInstrumentUsage> notes and variants per AHX instrument number (`NoteUsage`)
+---@param layout AhxInstrumentSlot[] all Renoise instruments in index order
 ---@return table<integer, table<string, integer>> variant phrase indices by AHX instrument number
-function InstrumentWriter.write_all(song, plan, report, options, usage)
+---@return table<integer, AhxFilterSetup> filters Renoise filter per Renoise instrument index
+---@return table<integer, 'low'|'high'> filter_sides Renoise-filter side per AHX instrument number
+function InstrumentWriter.write_all(song, plan, report, options, usage, layout)
   local rns = renoise.song()
-  local variant_phrases = {}
-
-  for number = 1, song.instrument_count do
-    if number > #rns.instruments then
-      rns:insert_instrument_at(number)
-    end
-    variant_phrases[number] =
-      InstrumentWriter.write(rns.instruments[number], song, number, plan, usage[number], report, options)
+  local variant_phrases, filters, filter_sides = {}, {}, {}
+  while #rns.instruments < #layout do
+    rns:insert_instrument_at(#rns.instruments + 1)
   end
-  return variant_phrases
+
+  for _, slot in ipairs(layout) do
+    if slot.separator then
+      local target = rns.instruments[slot.index]
+      target:clear()
+      target.name = slot.separator
+    elseif not slot.copy_of then
+      local number = slot.source
+      variant_phrases[number], filters[slot.index] =
+        InstrumentWriter.write(song, number, slot.index, plan, usage[number], report, options)
+      filter_sides[number] = filters[slot.index] and filters[slot.index].side
+    else
+      -- A copy keeps the phrases (same indices for 0Zxx) and, as a copy of the whole instrument, the macro mappings.
+      local target = rns.instruments[slot.index]
+      target:copy_from(rns.instruments[slot.copy_of])
+      filters[slot.index] = filters[slot.copy_of]
+      check_mappings(target, report)
+      ProcessSlicer.step(('Instrument copy %s'):format(target.name))
+    end
+  end
+  return variant_phrases, filters, filter_sides
 end
 
 return InstrumentWriter

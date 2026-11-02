@@ -19,9 +19,7 @@ local function write_lines(phrase, data)
   for index, line_data in pairs(data.lines) do
     local line = phrase:line(index)
     local column = line.note_columns[1]
-    if line_data.note_off then
-      column.note_string = 'OFF'
-    elseif line_data.note then
+    if line_data.note then
       column.note_value = line_data.note
       column.instrument_value = line_data.instrument
       if line_data.glide then
@@ -32,9 +30,6 @@ local function write_lines(phrase, data)
         line.effect_columns[1].number_string = '0S'
         line.effect_columns[1].amount_value = line_data.offset
       end
-    end
-    if line_data.volume then
-      column.volume_value = line_data.volume
     end
   end
 end
@@ -51,7 +46,7 @@ local function insert_phrase(instrument, index, data, phrase_lpb, name)
   phrase.number_of_lines = data.number_of_lines
   phrase.lpb = phrase_lpb
   phrase.instrument_column_visible = true
-  phrase.volume_column_visible = true
+  phrase.volume_column_visible = false
   phrase.visible_effect_columns = 1
   phrase.key_tracking = renoise.InstrumentPhrase.KEY_TRACKING_NONE
 

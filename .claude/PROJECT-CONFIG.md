@@ -88,6 +88,8 @@ become patterns and the pattern sequence.
   - `band_limit.lua` – band-limited resynthesis of a waveform cycle.
   - `note_usage.lua` – the notes each instrument is triggered with (one phrase per note) and its variants (9xx
     square offset and/or baked pitch slide), from the triggers the pattern converter records in play order.
+  - `instrument_slots.lua` – instrument layout: grouped by track behind separators, one instance per track, unused
+    instruments last.
   - `portamento.lua` – port of the track portamento (1xx/2xx/3xx/5xx/E1x/E2x, `PeriodSlide*`).
 - `importer/` – everything that touches the Renoise API:
   - `controller.lua` – workflow: parse → `ui/options_dialog.lua` → `song_creator.lua` (new song without template) →
@@ -97,12 +99,17 @@ become patterns and the pattern sequence.
   - `ui/widgets.lua` – shared dialog look (ported from SongMerger), `ui/options_dialog.lua` – import options.
   - `song_setup.lua` – four sequencer tracks (LRRL panning), no send/group tracks, Maximizer on the master, one
     instrument, one sequence slot.
-  - `instrument_writer.lua` (simulation → samples + phrase), `sample_writer.lua`, `phrase_writer.lua`,
-    `pattern_writer.lua`.
-  - `filter_writer.lua` – modulation set with filter + cutoff envelope per sample (failures reported, sample stays
-    unfiltered).
-  - `release_writer.lua` – volume AHDSR (full level until note-off, then release) for the hard cut release or the
-    PWM crossfade; failures are reported, not fatal, and the device is removed again. Modulation device parameters are
+  - `instrument_writer.lua` (simulation → samples + phrase; the instrument slot is loaded from a template first),
+    `sample_writer.lua`, `phrase_writer.lua`, `pattern_writer.lua`.
+  - `xrni_writer.lua` – instrument template (.xrni = uncompressed ZIP with `Instrument.xml`, written in Lua) with
+    macros mapped to inputs of all its modulation sets, loaded with `renoise.app():load_instrument` (the API cannot
+    create macro mappings); `modulation_sets.lua` – hands out the template's sets to the writers, removes unused ones.
+  - `macro_writer.lua` – *Instr. Macros device per track and instrument, lines-mode automation of the volume and
+    cutoff macros.
+  - `macro_prototype.lua` – development only (`@build:skip`): menu Tools › AHX Importer › Macro Prototype.
+  - `filter_writer.lua` – low-/high-pass filter and resonance in every modulation set, Hz → cutoff macro value by
+    probing the cutoff input (failures reported, instrument stays unfiltered).
+  - `release_writer.lua` – volume AHDSR for the PWM crossfade; failures are reported, not fatal, and the device is removed again. Modulation device parameters are
     set via `device.parameters` by name: the typed fields (`amount`, …) do not exist at runtime in Renoise 3.5.4
     (LFO names: Frequency, Amplitude, Dephase, Delay; values accept strings in Hz / ms).
   - `util.lua` – tool name, console logging, dialog close watcher, device parameter lookup by name.
@@ -113,14 +120,18 @@ become patterns and the pattern sequence.
 - **Filters: automatic hybrid per instrument.**
   - PWM (square positions) is always baked: one sample per used pulse width.
   - Renoise-filter path (`ahx/filter_path.lua`, `importer/filter_writer.lua`): when all simulated filter positions
-    stay on one side (low-pass 1..32 or high-pass 32..63, 32 = open) and nothing else changes the sample during a
-    note (waveform, pulse width, performance portamento, baked track slides), the samples are unfiltered and every phrase gets a sample of
-    its own with its own modulation set: low-/high-pass filter (`LP Clean` etc.), resonance from the import options (0..0.3, default 0.136), cutoff input at maximum and a
-    cutoff envelope (operator multiply, points mode, one point per frame, loop = simulation loop). The cutoff per
-    frame is the AHX filter's: fc = fs · asin(f / 2) / π with f = (8 + 3 · step) · 1.25 / 100 and fs = Paula rate of
-    the frame's pitch. Hz are mapped to the normalized cutoff by probing the cutoff parameter's value strings.
+    stay on one side (low-pass 1..32 or high-pass 32..63, 32 = open), the samples are unfiltered (shared by all
+    phrases) and every modulation set gets the low-/high-pass filter (`LP Clean` etc.) with the resonance from the
+    import options (0..0.3, default 0.136). The template's macro 2 "Cutoff" is mapped (linear 0..1) to the cutoff
+    input (mixer parameter 4, checked by name after loading) of all sets, and the pattern converter writes the cutoff
+    of every frame as its automation (lines mode, like the volume; open filter = 1 for low-pass, 0 for high-pass).
+    The cutoff per frame is the AHX filter's: fc = fs · asin(f / 2) / π with f = (8 + 3 · step) · 1.25 / 100 and
+    fs = Paula rate of the frame's period (performance note + track note with transpose, performance and track
+    portamento). Hz are mapped to the macro value by probing the cutoff input's value strings.
     Reason: baked sweeps retrigger the sample on every filter step, which sounds rough (syphus - returns, AHX 01).
-  - Otherwise (sweep crossing position 32, or sample changes anyway) the used filter positions are baked.
+    The automation does not restart with sample switches, so (unlike the former cutoff envelope per sample, max
+    1 s) waveform / pulse width changes and slides no longer exclude an instrument from this path.
+  - Otherwise (sweep crossing position 32) the used filter positions are baked.
 - Samples hold the waveform cycle repeated to 256 frames (the replayer uses 0x280) as a forward loop; interpolation
   and bit depth come from the import options. (Tried and reverted: upsampling short cycles for a finer 0Sxx phase;
   barely audible, did not fix rough PWM/filter steps.)
@@ -128,8 +139,15 @@ become patterns and the pattern sequence.
   AHX note C-3 (3579545.25 / 856 ≈ 4181.7 Hz) one octave up, i.e. 8363 Hz at base note C-4.
 - An import always creates a new song (`new_song_no_template`, Renoise asks to save the current one). The song name
   is the AHX song name (trimmed; the file name without extension when empty), set at the start and again at the end
-  of the build. The progress dialog says 'Importing "<file name>"...'. No empty
-  instrument slots: AHX instrument n is Renoise instrument n, the song's default instrument is reused.
+  of the build. The progress dialog says 'Importing "<file name>"...'. Instrument
+  layout (`ahx/instrument_slots.lua`): grouped by track, each group behind an empty separator instrument
+  "---- AHX n ----", the instruments of a track in the order of their first use (pre-pass), then a group
+  "---- unused ----" with the instruments the song never plays. Every track plays its own instances (the macros
+  belong to the instrument): the first instance of an AHX instrument is built, the others are `instrument:copy_from`
+  copies with the same name (phrases, 0Zxx indices and macro mappings stay). The instrument names keep the AHX
+  number ("AHX 03 …"). More than 255 instruments stop the import with an error (no fallback). The *Instr. Macros
+  devices of a track are created before the patterns, in the order of the track's instruments, and carry the
+  instrument's name. The song's default instrument is reused.
 - Each sequence segment becomes one pattern (lines = played rows); identical patterns are reused in the sequence.
   The sequence loop range is set to the song's loop point.
 - Timing: one phrase line = one AHX frame, one pattern line = one AHX row, one tick = one frame. A phrase's line rate
@@ -155,9 +173,9 @@ become patterns and the pattern sequence.
   at that position. Cycle samples are therefore 256 frames (a whole number of cycles for every wave length, 0Sxx
   addresses each frame). Loops longer than one frame are unrolled up to 512 lines so the phase stays right; only the
   repeats of the last loop pass can drift. This is why phrases are per note: the position depends on the pitch.
-- A phrase must keep running to keep its volume: after a one-shot phrase ends, the sample plays on at the pattern
-  volume (observed in Renoise: loud noise after the snare of pink - sometimes). Steady states therefore end with a
-  note-off when silent, or become a two-line loop when audible.
+- A phrase ends at a steady state (one-frame simulation loop, after a baked slide is over): the sample plays on and
+  the volume comes from the automation. (Before the volume automation, a phrase had to keep running to keep its
+  volume: loud noise after the snare of pink - sometimes.)
 - Instrument vibrato: pattern vibrato 0Vxy on every line after the vibrato delay until the next trigger (it starts
   on the first line whose middle lies behind the delay; a whole row at once was too early in thanatos).
   x = vibrato speed · song speed / (6 · lines per row) (Renoise's vibrato rate follows the lines; verified by ear:
@@ -165,12 +183,23 @@ become patterns and the pattern sequence.
   the current note; E4x supported. x above F is clamped and reported (that was why thanatos sounded too slow at 1×:
   x = 24). Rejected: an instrument LFO (restarts with every sample switch) and baking the vibrato into the phrase via
   fine tune samples (too many sample switches).
-- Every phrase note line (also 0GFF glides) carries its volume: a note with an empty volume column plays at full
-  volume, so the envelope would be lost on every retrigger or glide.
-- Hard cut (instrument hard cut frames): like the replayer, the note ends that many frames before the next row of
-  the channel that triggers an instrument (look-ahead into the next position of the list, regardless of jumps), as a
-  note-off with delay; not possible on a row with its own note. With the instrument's release flag a volume AHDSR
-  releases over the hard cut frames, otherwise the note-off cuts.
+- Volume: every instrument is loaded from a template (`importer/xrni_writer.lua`) whose macro 1 "Volume" is mapped
+  (linear 0..1) to the volume input (mixer device 0, parameter 1; verified with the prototype) of all modulation sets
+  (set 1 + note start set + one per sample on the filter path; unused ones removed, missing mappings reported); every
+  sample uses a set. The pattern converter computes the AHX output volume per frame and channel
+  (`PatternConverter:advance_volume`): envelope · performance volume (instrument simulation, restarted by an
+  instrument, not by a note without instrument) · note volume (instrument volume, Cxx, EAx/EBx, slides A/5 per
+  frame) · voice master volume (C50..C90 all voices, CA0..CE0 one voice), with the step's changes in the step's frame
+  (note delay). Note cut ECx and hard cut (that many frames before the next row of the channel that triggers an
+  instrument, look-ahead into the next position regardless of jumps) set the note volume to 0; with the instrument's
+  release flag the hard cut releases the envelope to the release volume over the rest of the row, like the
+  replayer. The value (output / 64) is written as lines-mode automation of the volume parameter of an *Instr.
+  Macros device per track and instrument (`importer/macro_writer.lua`; a new device links to the selected
+  instrument, its parameters are named like the macros); a change after a constant stretch gets a point on the
+  previous frame too, so the line only ramps between neighboring frames; every pattern gets a point on line 1 for
+  the playing instrument and every instrument it sets. Phrases have no volume column, the pattern has no 0Mxx and no
+  note-offs. The volume macro belongs to the instrument, so every track plays its own instances (see the instrument
+  layout; before, two tracks fought over one macro and the PWM sounded chopped: syphus - galactic olympics).
 - All samples use new note action "note cut": every sample switch of a phrase is a new note, and the old one must stop
   at once (with "note off", the AHDSR release let old notes fade underneath and modulated the volume; verified).
 - Variant phrases: a trigger with a 9xx square offset and/or a pitch slide after it gets an unmapped variant phrase,
@@ -194,23 +223,14 @@ become patterns and the pattern sequence.
   Filter resonance slider 0..0.3 (default 0.136) for the Renoise-filter path.
   PWM crossfade slider 0..20 ms (0 = off, default 10 ms by ear): a volume AHDSR with attack = release = the crossfade time and new
   note action "note off", so every sample switch of a phrase crossfades (against the ring-modulation-like roughness of
-  PWM). Only for instruments whose phrases switch samples, not for instruments with hard cut release (they keep
-  "note cut"; reported). The note start must not fade in: the sample of each phrase's first line is a copy
+  PWM). Only for instruments whose phrases switch samples. The note start must not fade in: the sample of each phrase's first line is a copy
   ("(start)") with modulation set "Note start" (copy of set 1 without attack).
   Pattern resolution Auto / 1× / 2× / 4× pattern lines per AHX row (default Auto = the smallest resolution at which
   no vibrato needs 0Vxy speed above F, `ahx/resolution.lua`): LPB × factor, TPL / factor (a tick stays
-  a frame when the speed is divisible, otherwise approximated and reported), note delay / note cut / hard cut go to
-  the sub line of their frame, 0Vxy is repeated on every line; reduced when a pattern would exceed 512 lines.
+  a frame when the speed is divisible, otherwise approximated and reported), a note delay goes to the sub line of
+  its frame, 0Vxy is repeated on every line; reduced when a pattern would exceed 512 lines.
   Observed: the 0Vxy rate follows the line rate (rate ∝ x · lines per second); x is clamped at F. The dialog starts with the saved options; Import uses the current
   choice, Save stores it (while the choice equals the saved options, the Save button shows "✔ Save" (bold) and is disabled).
-- Volume: the phrase's volume column carries envelope · performance volume (0..64 → 0..0x80) and overwrites the
-  pattern's note volume on every phrase note line. The AHX note volume (instrument volume, Cxx, EAx/EBx, volume
-  slides A/5) therefore goes into the channel volume 0Mxx (0..64 → 0..0xFF): written on every trigger (AHX resets it)
-  and whenever it changes; slides are applied per row (value after the row's first frame). Sample volume stays 1.
-  The channel volume also includes the voice master volume (C50..C90 all voices, CA0..CE0 one voice; used e.g. for
-  echo voices in syphus - returns).
-- Note cut ECx: a volume cut (0Cxy) does not last because the phrase rewrites the note volume, so a row without note
-  gets a note-off with delay (x frames); only with a note on the same row 0Cxy is used.
 - Keyzones keep "Vel->Vol" enabled: extra samples use velocity range 0..0, which is then never triggered.
 - Pitch slides (1xx/2xx/3xx/5xx/E1x/E2x) are baked into variant phrases. Pattern slides (0U/0D/0G) and an automated
   instrument pitchbend (tried: *Instr. MIDI Control, pitchbend macro mapped via a generated .xrni) change the pitch

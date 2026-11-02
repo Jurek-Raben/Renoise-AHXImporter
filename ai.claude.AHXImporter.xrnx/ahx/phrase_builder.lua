@@ -1,5 +1,6 @@
 -- Builds neutral phrase data (no Renoise API) from a simulated note, for one triggered note: one line per frame with
--- the sample of the frame's waveform state, the absolute pitch and the envelope volume. Only changes are written.
+-- the sample of the frame's waveform state and the absolute pitch. Only changes are written. The volume (envelope,
+-- performance volume) is not part of the phrase: it is automated per track (volume macro, see `PatternConverter`).
 --
 -- AHX keeps the playback position when the waveform changes; Renoise restarts a sample on every trigger. To keep the
 -- phase, the builder follows the playback position of the cycle (from the pitch of every frame) and starts each
@@ -37,9 +38,7 @@ local MAX_PERIOD = 0x0d60
 ---@field sample_key string|nil `state_index .. ':' .. fine_index`
 ---@field state_index integer|nil waveform state
 ---@field fine_index integer|nil fine tune in 1/fine_steps semitones
----@field volume integer|nil 0..0x80
 ---@field glide boolean|nil pitch change of the playing sample without retrigger
----@field note_off boolean|nil
 ---@field offset integer|nil sample offset 0..255 (frame of the 256-frame buffer)
 
 ---@class AhxPhraseData
@@ -72,16 +71,13 @@ end
 
 ---Frames of the simulation; a loop longer than one frame is unrolled up to the phrase length, so the phase stays
 ---right for as long as possible (only the repeats of the last loop pass can drift).
----A one-frame loop is a steady state. A phrase must keep running to keep its volume (after a one-shot phrase ends, the
----sample plays on at the pattern volume), so a silent steady state ends with a note-off and an audible one becomes a
----two-line loop (Renoise needs loop end > loop start). A baked slide must not run inside the loop: the steady state is
----repeated until `min_length` frames (the slide's length) before it loops.
+---A one-frame loop is a steady state: the phrase ends there and the sample plays on (the volume comes from the
+---automation), after the steady state was repeated for `min_length` frames (the length of a baked slide).
 ---@param simulation AhxSimulation
----@param min_length integer frames before an audible steady state may loop
+---@param min_length integer frames the phrase has to cover (baked slide)
 ---@return AhxFrame[] frames
 ---@return integer|nil loop_start
 ---@return integer|nil loop_end
----@return boolean note_off end the phrase with a note-off line after the frames
 local function unrolled_frames(simulation, min_length)
   local frames = {}
   for index, frame in ipairs(simulation.frames) do
@@ -90,18 +86,14 @@ local function unrolled_frames(simulation, min_length)
 
   local loop_start, loop_end = simulation.loop_start, simulation.loop_end
   if not loop_start then
-    return frames, nil, nil, false
+    return frames, nil, nil
   end
   if loop_end <= loop_start then
     local last = frames[#frames]
-    if last.volume == 0 then
-      return frames, nil, nil, true
-    end
-    while #frames < math.min(min_length, MAX_LINES - 1) do
+    while #frames < math.min(min_length, MAX_LINES) do
       frames[#frames + 1] = last
     end
-    frames[#frames + 1] = last
-    return frames, #frames - 1, #frames, false
+    return frames, nil, nil
   end
 
   local length = loop_end - loop_start + 1
@@ -112,7 +104,7 @@ local function unrolled_frames(simulation, min_length)
       frames[#frames + 1] = frames[index]
     end
   end
-  return frames, first, #frames, false
+  return frames, first, #frames
 end
 
 ---Builds the phrase of an instrument for one triggering note.
@@ -134,10 +126,10 @@ function PhraseBuilder.build(
   slides
 )
   slides = slides or {}
-  local frames, loop_start, loop_end, note_off = unrolled_frames(simulation, #slides)
+  local frames, loop_start, loop_end = unrolled_frames(simulation, #slides)
   local data = {
     note = trigger_note,
-    number_of_lines = note_off and #frames + 1 or #frames,
+    number_of_lines = #frames,
     lines = {},
     loop_start = loop_start,
     loop_end = loop_end,
@@ -145,8 +137,8 @@ function PhraseBuilder.build(
   local track_ahx_note = trigger_note - NoteUsage.NOTE_OFFSET
   local simulated_count = #simulation.frames
 
-  -- Renoise note, fine tune, waveform state, sample key, played pitch and volume of every frame.
-  local notes, fines, states, samples, pitches, volumes = {}, {}, {}, {}, {}, {}
+  -- Renoise note, fine tune, waveform state, sample key and played pitch of every frame.
+  local notes, fines, states, samples, pitches = {}, {}, {}, {}, {}
   -- Pitch jumps (arpeggios) keep the playing sample: a jump of at least JUMP_SEMITONES with an unchanged waveform state
   -- only changes the note (0GFF) and keeps the fine tune of the playing sample (off by a few cents of the period
   -- table tuning), until the waveform state changes or the pitch moves in small steps (slide). Otherwise every
@@ -198,7 +190,6 @@ function PhraseBuilder.build(
     fines[index] = fine
     pitches[index] = note + fine / fine_steps
     samples[index] = states[index] .. ':' .. fines[index]
-    volumes[index] = frame.volume * 2
   end
 
   -- Playback position inside the sample buffer (frames), as Renoise plays it.
@@ -210,12 +201,11 @@ function PhraseBuilder.build(
       previous[#previous + 1] = loop_end
     end
 
-    local note_changed, sample_changed, volume_changed = index == 1, index == 1, index == 1
+    local note_changed, sample_changed = index == 1, index == 1
     for _, other in ipairs(previous) do
       if other >= 1 then
         note_changed = note_changed or notes[other] ~= notes[index]
         sample_changed = sample_changed or samples[other] ~= samples[index]
-        volume_changed = volume_changed or volumes[other] ~= volumes[index]
       end
     end
 
@@ -237,21 +227,12 @@ function PhraseBuilder.build(
         end
       end
     end
-    -- A note line (also a 0GFF glide) starts at full volume when its volume column is empty, so every note line
-    -- carries the current volume (observed in Renoise: the looping noise of the pink - sometimes snare got loud).
-    if volume_changed or line.note then
-      line.volume = volumes[index]
-    end
-    if line.note or line.volume then
+    if line.note then
       data.lines[index] = line
     end
 
     local rate = SAMPLE_RATE * 2 ^ ((pitches[index] - BASE_NOTE) / 12)
     position = (position + rate / frames_per_second) % Tables.SAMPLE_BUFFER_LENGTH
-  end
-
-  if note_off then
-    data.lines[#frames + 1] = { note_off = true }
   end
 
   return data

@@ -1,6 +1,7 @@
 -- Import workflow: pick or receive a file, parse it, ask for the import options, create a new song and build it
 -- sliced with a progress dialog.
 
+local InstrumentSlots = require('ahx.instrument_slots')
 local NoteUsage = require('ahx.note_usage')
 local Parser = require('ahx.parser')
 local PatternConverter = require('ahx.pattern_converter')
@@ -52,10 +53,14 @@ local function build_song(song, file_name, options)
   if not plan.exact then
     report('speed combination (rows approximated)')
   end
-  -- Pre-pass over the play order: the triggered notes, square offsets and following slides decide the phrases.
-  local triggers = PatternConverter.scan_triggers(song, plan, Sequence.build(song, 0))
+  -- Pre-pass over the play order: the triggered notes, square offsets and following slides decide the phrases; the
+  -- instruments of every track in the order of their first use decide the instrument layout (one instance per track,
+  -- grouped by track, because the macros belong to the instrument).
+  local triggers, channel_instruments = PatternConverter.scan_triggers(song, plan, Sequence.build(song, 0))
   local usage, trigger_keys = NoteUsage.from_triggers(song, triggers)
-  local variant_phrases = InstrumentWriter.write_all(song, plan, report, options, usage)
+  local slots, layout = InstrumentSlots.plan(song, channel_instruments)
+  local variant_phrases, filters, filter_sides =
+    InstrumentWriter.write_all(song, plan, report, options, usage, layout)
   local lines_per_row = options.lines_per_row
   if lines_per_row == 0 then
     local highest_x
@@ -67,10 +72,18 @@ local function build_song(song, file_name, options)
     lines_per_row = lines_per_row / 2
     report('pattern resolution reduced (more than 512 lines per pattern)')
   end
-  local summary = PatternWriter.write_song(song, 0, plan, report, variant_phrases, lines_per_row, trigger_keys)
+  local summary = PatternWriter.write_song(song, 0, plan, report, {
+    variant_phrases = variant_phrases,
+    lines_per_row = lines_per_row,
+    trigger_keys = trigger_keys,
+    slots = slots,
+    filters = filters,
+    filter_sides = filter_sides,
+  })
   summary.unsupported = unsupported
 
-  rns.selected_instrument_index = 1
+  -- The first real instrument (index 1 is a separator when the song plays anything).
+  rns.selected_instrument_index = math.min(#rns.instruments, layout[1] and layout[1].separator and 2 or 1)
   rns.selected_sequence_index = 1
   -- Set again at the end: the song name is the AHX song name (the file name when it is empty).
   rns.name = song_name(song, file_name)

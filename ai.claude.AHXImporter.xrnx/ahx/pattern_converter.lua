@@ -4,14 +4,21 @@
 -- Output cell values are Renoise values: note 0..119, instrument 0-based, volume 0..0x80, delay 0..255,
 -- effects as { number = 'ZT', amount = 0..255 }.
 --
+-- The volume is not a pattern command either: the converter computes the AHX output volume of every frame (envelope
+-- and performance list of the instrument simulation, note volume, voice master volume, note cut, hard cut release) and
+-- writes it as automation points of macro 1 ("Volume") of the playing instrument (see `advance_volume`). Instruments
+-- on the Renoise-filter path get their cutoff per frame (Hz) the same way (macro 2 "Cutoff").
+--
 -- Pitch slides are not pattern commands: the converter runs the track portamento per frame and records, for every
 -- trigger, the slide periods until the channel's next trigger (`triggers`). Those become variant phrases with the
 -- slide baked in (see `Portamento`, `NoteUsage`), selected with 0Zxx on the trigger row.
 
 local bit = require('bit')
 
+local FilterPath = require('ahx.filter_path')
 local Portamento = require('ahx.portamento')
 local Resolution = require('ahx.resolution')
+local Simulator = require('ahx.simulator')
 local Tables = require('ahx.tables')
 local Timing = require('ahx.timing')
 
@@ -24,9 +31,8 @@ local FULL_VOLUME = 0x40
 
 ---@class AhxCell
 ---@field note integer|nil
----@field note_off boolean|nil
 ---@field legato boolean|nil retrigger of a note without instrument (AHX keeps the instrument running)
----@field delay_frames integer|nil frames after the row start (note delay, note cut, hard cut); placed by `convert`
+---@field delay_frames integer|nil frames after the row start (note delay); placed by `convert`
 ---@field vibrato { amount: integer, first_sub: integer }|nil 0Vxy from sub line `first_sub` on; placed by `convert`
 ---@field instrument integer|nil
 ---@field volume integer|nil
@@ -40,10 +46,22 @@ local FULL_VOLUME = 0x40
 ---@field square_offset integer|nil 9xx parameter on the trigger row
 ---@field slides integer[] slide period per frame from the trigger frame on, until the channel's next trigger
 
+---@class AhxVolumePoint
+---@field time number pattern line (1-based) plus 1/256 line fraction
+---@field instrument integer AHX instrument number whose volume macro is set
+---@field value number 0..1 (AHX output volume / 64)
+
+---@class AhxCutoffPoint
+---@field time number pattern line (1-based) plus 1/256 line fraction
+---@field instrument integer Renoise instrument index whose filter macro is set
+---@field value number|false cutoff in Hz, false = filter open
+
 ---@class AhxPatternData
 ---@field segment AhxSegment
 ---@field number_of_lines integer
 ---@field channels table<integer, table<integer, AhxCell>> channels[1..4][line 1..n], only non-empty cells
+---@field volumes table<integer, AhxVolumePoint[]> volume automation points per channel, in time order
+---@field cutoffs table<integer, AhxCutoffPoint[]> cutoff automation points per channel, in time order
 ---@field effect_columns integer highest number of effects in one cell
 ---@field uses_delay boolean
 ---@field key string content fingerprint for de-duplication
@@ -54,13 +72,22 @@ local FULL_VOLUME = 0x40
 ---@param variant_phrases table<integer, table<string, integer>> variant phrase index by instrument and variant key
 ---@param lines_per_row integer|nil pattern lines per AHX row (pattern resolution option, default 1)
 ---@param trigger_keys table<string, string>|nil variant key by trigger id (from a previous pass, see `NoteUsage`)
+---@param slots table<integer, table<integer, integer>>|nil Renoise instrument index per channel and AHX instrument
+---(one instance per track, see `InstrumentSlots`); missing = the AHX instrument number
+---@param filter_sides table<integer, 'low'|'high'>|nil Renoise-filter side per AHX instrument (`FilterPath`)
 ---@return table converter
-function PatternConverter.new(song, plan, report, variant_phrases, lines_per_row, trigger_keys)
+function PatternConverter.new(song, plan, report, variant_phrases, lines_per_row, trigger_keys, slots, filter_sides)
   local self = setmetatable({}, PatternConverter)
   self.song = song
   self.plan = plan
   self.variant_phrases = variant_phrases or {}
   self.trigger_keys = trigger_keys or {}
+  self.slots = slots or {}
+  self.filter_sides = filter_sides or {}
+  -- AHX instruments per channel in the order of their first use (pre-pass: every track gets its own instances, see
+  -- `InstrumentSlots`).
+  self.channel_instruments = { {}, {}, {}, {} }
+  self.channel_seen = { {}, {}, {}, {} }
   ---@type AhxTrigger[]
   self.triggers = {}
   self.lines_per_row = lines_per_row or 1
@@ -68,13 +95,36 @@ function PatternConverter.new(song, plan, report, variant_phrases, lines_per_row
     report(name)
   end
   self.tempo = Timing.INITIAL_SPEED
+  -- Plain instrument simulations (the volume does not depend on the pitch or a square offset), by instrument number.
+  self.simulations = {}
+  -- Frames since the start of the sequence, and the pattern time of the previous frame (nil at a segment start).
+  self.frame_counter = 0
+  self.previous_time = nil
   self.channels = {}
   for channel = 1, 4 do
     self.channels[channel] = {
       note = nil,
       instrument = 0,
+      -- Note volume (`NoteMaxVolume`) and the changes of the current step, applied in the step's frame.
       volume = FULL_VOLUME,
-      channel_volume = nil,
+      step_volume_set = nil,
+      step_volume_add = 0,
+      slide_delta = 0,
+      -- Instrument simulation of the playing note and the number of frames played since its trigger.
+      simulation = nil,
+      simulation_frame = 0,
+      -- Hard cut release in progress: envelope volume, change per frame, frames left.
+      release = nil,
+      hard_cut_release = false,
+      -- Note cut of the current row: frame of the row, with release.
+      cut_frame = nil,
+      cut_release = false,
+      -- Last written automation value per instrument and the frame counter of that point (see `emit_point`).
+      volume_track = { values = {}, frames = {} },
+      cutoff_track = { values = {}, frames = {} },
+      -- Track portamento period and track note of the frames of the current row (`advance_portamento`).
+      frame_slides = {},
+      frame_track_notes = {},
       portamento = Portamento.new(),
       -- Trigger whose slide periods are being recorded.
       trigger = nil,
@@ -82,9 +132,6 @@ function PatternConverter.new(song, plan, report, variant_phrases, lines_per_row
       vibrato = nil,
       frames = 0,
       track_master_volume = FULL_VOLUME,
-      heard_volume = FULL_VOLUME,
-      triggered = false,
-      cut = false,
       hard_cut = 0,
     }
   end
@@ -137,6 +184,15 @@ function PatternConverter:add_tempo(cell, tempo)
   add_effect(cell, 'ZK', tpl)
 end
 
+---Renoise instrument index of an AHX instrument on a channel (every track has its own instances).
+---@param channel integer
+---@param instrument integer AHX instrument number
+---@return integer
+function PatternConverter:slot(channel, instrument)
+  local slots = self.slots[channel]
+  return slots and slots[instrument] or instrument
+end
+
 ---Converts one step of one channel.
 ---@param channel integer 1..4
 ---@param step AhxStep
@@ -168,13 +224,29 @@ function PatternConverter:convert_step(channel, step, transpose, next_instrument
     state.step_delay = low
   end
 
+  -- Volume changes of the step, in the replayer's order: the instrument resets the note volume, Cxx sets it, EAx/EBx
+  -- change it. They apply in the step's frame (`advance_volume`).
+  state.step_volume_set = nil
+  state.step_volume_add = 0
+  state.slide_delta = 0
+  state.cut_frame = nil
+
   local instrument = step.instrument
   if instrument > 0 then
     state.instrument = instrument
     local triggered_instrument = self.song.instruments[instrument]
     state.hard_cut = triggered_instrument and triggered_instrument.hard_cut_release_frames or 0
-    state.volume = self.song.instruments[instrument] and self.song.instruments[instrument].volume or 0
-    cell.instrument = instrument - 1
+    state.hard_cut_release = triggered_instrument ~= nil and triggered_instrument.hard_cut_release ~= 0
+    state.step_volume_set = triggered_instrument and triggered_instrument.volume or 0
+    -- An instrument number beyond the song's instruments plays the replayer's empty instrument: silence.
+    if triggered_instrument then
+      cell.instrument = self:slot(channel, instrument) - 1
+    end
+    if triggered_instrument and not self.channel_seen[channel][instrument] then
+      self.channel_seen[channel][instrument] = true
+      local order = self.channel_instruments[channel]
+      order[#order + 1] = instrument
+    end
   end
 
   -- Tone portamento (3xx, 5xx): the note does not trigger, it only sets the slide target (like the replayer). An
@@ -186,12 +258,12 @@ function PatternConverter:convert_step(channel, step, transpose, next_instrument
     end
   elseif note then
     cell.note = note
-    if instrument == 0 and state.note and state.instrument > 0 then
+    if instrument == 0 and state.note and state.instrument > 0 and self.song.instruments[state.instrument] then
       -- AHX changes the pitch without retriggering the instrument. A pattern glide (0GFF) fought with the absolute
       -- pitches of the phrase whenever the phrase switches samples (distorted sound with PWM, syphus - galactic
       -- olympics AHX 3 / instrument 07), so the note is retriggered with the instrument; the phrase of the new note
       -- starts from its beginning. The note volume and the running vibrato stay as in AHX.
-      cell.instrument = state.instrument - 1
+      cell.instrument = self:slot(channel, state.instrument) - 1
       cell.legato = true
     end
     state.note = note
@@ -222,30 +294,29 @@ function PatternConverter:convert_step(channel, step, transpose, next_instrument
 
   if fx == 0xc then
     if param <= 0x40 then
-      state.volume = param
+      state.step_volume_set = param
+      state.step_volume_add = 0
     elseif param - 0x50 <= 0x40 then
-      -- C50..C90: master volume of all voices (applied after the row, see `apply_channel_volumes`).
-      self.new_master_volume = math.max(0, param - 0x50)
+      -- C50..C90: master volume of all voices. The replayer runs all steps of a row before its frames, so it applies
+      -- to all channels from this row on.
+      for other = 1, 4 do
+        self.channels[other].track_master_volume = math.max(0, param - 0x50)
+      end
     elseif param - 0xa0 >= 0 and param - 0xa0 <= 0x40 then
       -- CA0..CE0: master volume of this voice.
       state.track_master_volume = param - 0xa0
     end
   elseif fx == 0xe then
     if high == 0xa then
-      state.volume = math.min(FULL_VOLUME, state.volume + low)
+      state.step_volume_add = state.step_volume_add + low
     elseif high == 0xb then
-      state.volume = math.max(0, state.volume - low)
+      state.step_volume_add = state.step_volume_add - low
     elseif high == 0xc then
       if low > 0 and low < self.tempo then
-        -- Note cut after `low` frames. The phrase rewrites the note volume on its lines, so a volume cut (0Cxy) does
-        -- not last; a delayed note-off stops the phrase instead. With a note on the same row only 0Cxy is possible.
-        if cell.note then
-          add_effect(cell, '0C', low)
-        else
-          cell.note_off = true
-          cell.delay_frames = low
-        end
-        state.cut = true
+        -- Note cut after `low` frames: the note volume drops to 0 (`advance_volume`).
+        state.cut_frame = low
+        state.cut_release = false
+        state.hard_cut_release = false
         state.hard_cut = 0
       end
     elseif high == 0x4 then
@@ -260,34 +331,19 @@ function PatternConverter:convert_step(channel, step, transpose, next_instrument
     self:report_unsupported('4xx filter override')
   end
 
-  -- Note volume (AHX `NoteMaxVolume`). The phrase writes the envelope into every note line's volume, which would
-  -- overwrite volume column values and fades of the pattern, so the note volume goes into the channel volume (0Mxx)
-  -- instead: on every trigger, and whenever it changes. Volume slides (A, 5) run per frame; the channel volume is
-  -- set per row to the value after the row's first frame.
   -- Hard cut: an instrument with hard cut frames ends its note that many frames before the next row that triggers an
-  -- instrument (with release when the instrument says so, see `ReleaseWriter`). A delayed note-off does it; on a row
-  -- with its own note there is no room for one.
+  -- instrument, with a release over those frames when the instrument says so (`advance_volume`).
   if state.hard_cut > 0 and next_instrument > 0 then
-    if not cell.note and not cell.note_off and not cell.delay_frames then
-      cell.note_off = true
-      cell.delay_frames = math.max(0, self.tempo - state.hard_cut)
+    if not state.cut_frame then
+      state.cut_frame = math.max(0, self.tempo - state.hard_cut)
+      state.cut_release = state.hard_cut_release
     end
     state.hard_cut = 0
   end
 
-  -- The channel volume itself is written after the whole row (`apply_channel_volumes`), because a master volume
-  -- command in one channel changes all channels.
-  state.heard_volume = state.volume
+  -- Volume slides (A, 5) change the note volume in every frame from the step's frame on.
   if fx == 0x5 or fx == 0xa then
-    local delta = high - low
-    state.heard_volume = math.max(0, math.min(FULL_VOLUME, state.volume + delta))
-    state.volume = math.max(0, math.min(FULL_VOLUME, state.volume + delta * self.tempo))
-  end
-  state.triggered = cell.instrument ~= nil
-  if state.cut then
-    -- The cut note stays silent until the next trigger (the replayer sets the note volume to 0).
-    state.cut = false
-    state.volume = 0
+    state.slide_delta = high - low
   end
 
   self:add_vibrato(cell, state)
@@ -318,6 +374,8 @@ function PatternConverter:advance_portamento(channel, cell, step)
       end
     end
     Portamento.process_frame(portamento)
+    state.frame_slides[frame] = portamento.period
+    state.frame_track_notes[frame] = portamento.track_note
     local trigger = state.trigger
     if trigger and #trigger.slides < MAX_SLIDE_FRAMES then
       trigger.slides[#trigger.slides + 1] = portamento.period
@@ -325,12 +383,201 @@ function PatternConverter:advance_portamento(channel, cell, step)
   end
 end
 
+---@param instrument integer
+---@return AhxSimulation|nil
+function PatternConverter:simulation(instrument)
+  local simulation = self.simulations[instrument]
+  if simulation == nil then
+    local definition = self.song.instruments[instrument]
+    simulation = definition and Simulator.run(self.song, definition) or false
+    self.simulations[instrument] = simulation
+  end
+  return simulation or nil
+end
+
+---Frame `index` (1-based, frames since the trigger) of a simulation; the loop repeats, without loop the last frame
+---holds.
+---@param simulation AhxSimulation
+---@param index integer
+---@return AhxFrame
+local function simulation_frame(simulation, index)
+  local frames = simulation.frames
+  if index <= #frames then
+    return frames[index]
+  end
+  if simulation.loop_start then
+    local length = simulation.loop_end - simulation.loop_start + 1
+    return frames[simulation.loop_start + (index - simulation.loop_start) % length]
+  end
+  return frames[#frames]
+end
+
+---Adds an automation point where the value of an instrument's macro changes. Automation uses lines mode: a change
+---after a constant stretch gets a point on the previous frame too, so the line only ramps between neighboring frames.
+---@param track { values: table, frames: table } last written value and its frame counter per instrument
+---@param points table the channel's points of the segment
+---@param instrument integer Renoise instrument index
+---@param value any
+---@param default any value before the first point (nil = unknown, no extra point)
+---@param counter integer frame counter of this frame
+---@param previous_time number|nil pattern time of the previous frame (nil at a segment start)
+---@param time number pattern time of this frame
+local function emit_point(track, points, instrument, value, default, counter, previous_time, time)
+  local last = track.values[instrument]
+  if last == nil then
+    last = default
+  end
+  if last == value then
+    return
+  end
+  if last ~= nil and previous_time and track.frames[instrument] ~= counter - 1 then
+    points[#points + 1] = { time = previous_time, instrument = instrument, value = last }
+  end
+  points[#points + 1] = { time = time, instrument = instrument, value = value }
+  track.values[instrument] = value
+  track.frames[instrument] = counter
+end
+
+---Runs the volume of one channel through the frames of a row and adds automation points of the playing instrument's
+---volume macro where it changes. Port of the volume part of `ProcessStep` / `ProcessFrame` / `SetAudio`:
+---output = envelope · performance volume (instrument simulation) · note volume · voice master volume.
+---Instruments on the Renoise-filter path also get the cutoff of every frame (filter macro).
+---@param channel integer 1..4
+---@param step AhxStep
+---@param transpose integer position transpose of the channel
+---@param times number[] pattern time of the frames 0 .. tempo - 1 of the row
+---@param data AhxPatternData
+function PatternConverter:advance_volume(channel, step, transpose, times, data)
+  local state = self.channels[channel]
+  for frame = 0, self.tempo - 1 do
+    local counter = self.frame_counter + frame
+    if frame == state.step_delay then
+      -- An instrument restarts the instrument (envelope, performance list); a note without instrument does not.
+      if step.instrument > 0 then
+        state.simulation = self:simulation(step.instrument)
+        state.simulation_frame = 0
+        state.release = nil
+      end
+      local volume = state.step_volume_set or state.volume
+      state.volume = math.max(0, math.min(FULL_VOLUME, volume + state.step_volume_add))
+    end
+
+    -- Note cut / hard cut: without release the note volume drops to 0; with release the envelope fades from its
+    -- current volume to the instrument's release volume over the remaining frames of the row.
+    if state.cut_frame == frame then
+      local simulation = state.simulation
+      if state.cut_release and simulation then
+        local adsr = state.release and state.release.adsr
+          or (state.simulation_frame > 0 and simulation_frame(simulation, state.simulation_frame).adsr or 0)
+        local release_volume = self.song.instruments[state.instrument].envelope.r_volume * 256
+        local frames = math.max(1, self.tempo - frame)
+        state.release = {
+          adsr = adsr,
+          step = -(adsr - release_volume) / frames,
+          frames = frames,
+          target = release_volume,
+        }
+      else
+        state.volume = 0
+      end
+    end
+
+    if frame >= state.step_delay then
+      state.volume = math.max(0, math.min(FULL_VOLUME, state.volume + state.slide_delta))
+    end
+
+    local output = 0
+    local cutoff = nil
+    local simulation = state.simulation
+    if simulation then
+      state.simulation_frame = state.simulation_frame + 1
+      local record = simulation_frame(simulation, state.simulation_frame)
+      local side = self.filter_sides[state.instrument]
+      if side then
+        local track_note = math.max(0, math.min(60, state.frame_track_notes[frame] + transpose))
+        cutoff = FilterPath.cutoff(record, side, track_note, state.frame_slides[frame])
+      end
+      local instrument_volume = record.volume
+      local release = state.release
+      if release then
+        if release.frames > 0 then
+          release.adsr = release.adsr + release.step
+          release.frames = release.frames - 1
+          if release.frames <= 0 then
+            release.adsr = release.target
+          end
+        end
+        instrument_volume = Simulator.frame_volume(record, release.adsr)
+      end
+      output = instrument_volume * state.volume * state.track_master_volume / (FULL_VOLUME * FULL_VOLUME)
+    end
+
+    -- (`song.instruments[0]` is the replayer's empty instrument.)
+    local valid = state.instrument > 0 and self.song.instruments[state.instrument] ~= nil
+    local instrument = valid and self:slot(channel, state.instrument) or 0
+    if instrument > 0 then
+      local previous_time = frame > 0 and times[frame - 1] or self.previous_time
+      local time = times[frame]
+      local value = math.floor(output + 0.5) / FULL_VOLUME
+      emit_point(state.volume_track, data.volumes[channel], instrument, value, 0, counter, previous_time, time)
+      if cutoff ~= nil then
+        emit_point(state.cutoff_track, data.cutoffs[channel], instrument, cutoff, nil, counter, previous_time, time)
+      end
+    end
+  end
+end
+
+---Prepends a point on the first line for the playing instrument of a channel and for every instrument the channel
+---sets in the segment (a pattern can be reached from different places: loop, reuse). Without a value at the segment
+---start, the instrument's first point of the segment is used.
+---@param lists table<integer, table[]> points per channel
+---@param channel integer
+---@param start table<integer, any> value per instrument at the segment start
+---@param playing integer Renoise instrument playing at the segment start (0 = none)
+local function add_start_points(lists, channel, start, playing)
+  local points = lists[channel]
+  local needed = {}
+  if playing > 0 and start[playing] ~= nil then
+    needed[playing] = true
+  end
+  for _, point in ipairs(points) do
+    needed[point.instrument] = true
+  end
+  for _, point in ipairs(points) do
+    if point.time == 1 then
+      needed[point.instrument] = nil
+    end
+  end
+  local instruments = {}
+  for instrument in pairs(needed) do
+    instruments[#instruments + 1] = instrument
+  end
+  table.sort(instruments)
+  local result = {}
+  for _, instrument in ipairs(instruments) do
+    local value = start[instrument]
+    if value == nil then
+      for _, point in ipairs(points) do
+        if point.instrument == instrument then
+          value = point.value
+          break
+        end
+      end
+    end
+    result[#result + 1] = { time = 1, instrument = instrument, value = value }
+  end
+  for _, point in ipairs(points) do
+    result[#result + 1] = point
+  end
+  lists[channel] = result
+end
+
 ---Writes 0Vxy on rows where the instrument vibrato is running (after its delay, until the next trigger).
 ---@param cell AhxCell
 ---@param state table channel state
 function PatternConverter:add_vibrato(cell, state)
   if cell.instrument and not cell.legato then
-    local instrument = self.song.instruments[cell.instrument + 1]
+    local instrument = self.song.instruments[state.instrument]
     state.vibrato = {
       depth = instrument.vibrato_depth,
       speed = instrument.vibrato_speed,
@@ -378,7 +625,6 @@ end
 ---@return boolean
 local function is_empty(cell)
   return cell.note == nil
-    and not cell.note_off
     and cell.instrument == nil
     and cell.volume == nil
     and cell.delay == nil
@@ -389,38 +635,12 @@ end
 ---@param cell AhxCell
 ---@return string
 local function cell_key(cell)
-  local note = cell.note or (cell.note_off and 'OFF') or ''
+  local note = cell.note or ''
   local parts = { note, cell.instrument or '', cell.volume or '', cell.delay or '' }
   for _, effect in ipairs(cell.effects) do
     parts[#parts + 1] = effect.number .. effect.amount
   end
   return table.concat(parts, ',')
-end
-
----Writes the channel volume (0Mxx) of all channels of a row: note volume (AHX `NoteMaxVolume`) times the voice's
----master volume (`TrackMasterVolume`, C50..C90 for all voices, CA0..CE0 per voice). The phrase writes the envelope
----into every note line's volume, which would overwrite volume column values and fades of the pattern, so the note
----volume goes into the channel volume instead: on every trigger, and whenever it changes. Volume slides (A, 5) run
----per frame; the channel volume is set per row to the value after the row's first frame.
----@param cells AhxCell[] the row's cells of channels 1..4
-function PatternConverter:apply_channel_volumes(cells)
-  if self.new_master_volume then
-    for channel = 1, 4 do
-      self.channels[channel].track_master_volume = self.new_master_volume
-    end
-    self.new_master_volume = nil
-  end
-
-  for channel = 1, 4 do
-    local state = self.channels[channel]
-    local volume = state.heard_volume * state.track_master_volume / FULL_VOLUME
-    -- 0Mxx sets the channel volume to xx / 0xFF (fades verified by ear: xeron - 64k is all you need).
-    local amount = math.floor(volume * 0xff / FULL_VOLUME + 0.5)
-    if state.triggered or amount ~= state.channel_volume then
-      add_effect(cells[channel], '0M', amount)
-      state.channel_volume = amount
-    end
-  end
 end
 
 ---Merges a cell into the line of a channel (keeps existing values, appends effects).
@@ -433,7 +653,7 @@ local function merge(lines, line, cell)
     lines[line] = cell
     return
   end
-  for _, field in ipairs({ 'note', 'note_off', 'instrument', 'volume', 'delay' }) do
+  for _, field in ipairs({ 'note', 'instrument', 'volume', 'delay' }) do
     if existing[field] == nil then
       existing[field] = cell[field]
     end
@@ -443,9 +663,9 @@ local function merge(lines, line, cell)
   end
 end
 
----Places the cell of one row on its pattern lines. A row spans `lines_per_row` lines: delayed events (note delay,
----note cut, hard cut) go to the sub line of their frame with the remaining fraction in the delay column, and the
----vibrato command is repeated on every line of the row.
+---Places the cell of one row on its pattern lines. A row spans `lines_per_row` lines: a delayed note goes to the sub
+---line of its frame with the remaining fraction in the delay column, and the vibrato command is repeated on every line
+---of the row.
 ---@param lines table<integer, AhxCell>
 ---@param line integer first line of the row
 ---@param cell AhxCell
@@ -458,16 +678,7 @@ function PatternConverter:place(lines, line, cell)
     local position = frames * per_row / self.tempo
     local sub = math.floor(position)
     local delay = math.min(255, math.floor((position - sub) * 256))
-    if cell.note_off then
-      -- The note-off gets a cell of its own on its sub line; the row's effects stay on the first line.
-      cell.note_off = nil
-      if sub == 0 then
-        cell.note_off = true
-        cell.delay = delay
-      else
-        merge(lines, line + sub, { note_off = true, delay = delay, effects = {} })
-      end
-    elseif sub == 0 then
+    if sub == 0 then
       cell.delay = delay
     else
       -- Note delay: the whole step moves (the replayer processes the step only after the delay).
@@ -505,12 +716,29 @@ function PatternConverter:convert(segment, segment_index)
     segment = segment,
     number_of_lines = (segment.last_row - segment.first_row + 1) * self.lines_per_row,
     channels = { {}, {}, {}, {} },
+    volumes = { {}, {}, {}, {} },
+    cutoffs = { {}, {}, {}, {} },
     effect_columns = 0,
     uses_delay = false,
   }
   local key_parts = { data.number_of_lines }
   -- The replayer's look-ahead (hard cut) uses the next position of the list, regardless of jumps.
   local next_position = song.positions[(segment.position + 1) % song.position_count]
+  -- Automation values at the segment start (see `add_start_points`).
+  local start_volumes, start_cutoffs, start_instruments = {}, {}, {}
+  for channel = 1, 4 do
+    local state = self.channels[channel]
+    start_volumes[channel], start_cutoffs[channel] = {}, {}
+    for instrument, value in pairs(state.volume_track.values) do
+      start_volumes[channel][instrument] = value
+    end
+    for instrument, value in pairs(state.cutoff_track.values) do
+      start_cutoffs[channel][instrument] = value
+    end
+    local valid = state.instrument > 0 and self.song.instruments[state.instrument] ~= nil
+    start_instruments[channel] = valid and self:slot(channel, state.instrument) or 0
+  end
+  self.previous_time = nil
 
   for row = segment.first_row, segment.last_row do
     local line = (row - segment.first_row) * self.lines_per_row + 1
@@ -535,9 +763,20 @@ function PatternConverter:convert(segment, segment_index)
         next_step = song.tracks[next_position.track[channel - 1]][0]
       end
       cells[channel] = self:convert_step(channel, steps[row], position.transpose[channel - 1], next_step.instrument)
-      self:advance_portamento(channel, cells[channel], steps[row])
     end
-    self:apply_channel_volumes(cells)
+
+    -- Pattern time of every frame of the row (automation times are quantized to 1/256 line).
+    local times = {}
+    for frame = 0, self.tempo - 1 do
+      times[frame] = math.floor((line + frame * self.lines_per_row / self.tempo) * 256 + 0.5) / 256
+    end
+    for channel = 1, 4 do
+      local step = song.tracks[position.track[channel - 1]][row]
+      self:advance_portamento(channel, cells[channel], step)
+      self:advance_volume(channel, step, position.transpose[channel - 1], times, data)
+    end
+    self.frame_counter = self.frame_counter + self.tempo
+    self.previous_time = times[self.tempo - 1]
 
     for channel = 1, 4 do
       self:place(data.channels[channel], line, cells[channel])
@@ -545,6 +784,14 @@ function PatternConverter:convert(segment, segment_index)
   end
 
   for channel = 1, 4 do
+    add_start_points(data.volumes, channel, start_volumes[channel], start_instruments[channel])
+    add_start_points(data.cutoffs, channel, start_cutoffs[channel], start_instruments[channel])
+    for _, point in ipairs(data.volumes[channel]) do
+      key_parts[#key_parts + 1] = ('v%d:%s:%d=%.4f'):format(channel, point.time, point.instrument, point.value)
+    end
+    for _, point in ipairs(data.cutoffs[channel]) do
+      key_parts[#key_parts + 1] = ('c%d:%s:%d=%s'):format(channel, point.time, point.instrument, tostring(point.value))
+    end
     for line = 1, data.number_of_lines do
       local cell = data.channels[channel][line]
       if cell then
@@ -559,18 +806,20 @@ function PatternConverter:convert(segment, segment_index)
   return data
 end
 
----All triggers of a sequence with the slide that follows each of them (pre-pass before the instruments are written:
----the slides decide the variant phrases).
+---Pre-pass before the instruments are written: all triggers of a sequence with the slide that follows each of them
+---(they decide the variant phrases), and the AHX instruments of every channel in the order of their first use (each
+---track gets its own instances, see `InstrumentSlots`).
 ---@param song AhxSong
 ---@param plan AhxTimingPlan
 ---@param sequence AhxSequence
----@return AhxTrigger[]
+---@return AhxTrigger[] triggers
+---@return integer[][] channel_instruments AHX instrument numbers per channel 1..4
 function PatternConverter.scan_triggers(song, plan, sequence)
   local converter = PatternConverter.new(song, plan, function() end, {}, 1)
   for index, segment in ipairs(sequence.segments) do
     converter:convert(segment, index)
   end
-  return converter.triggers
+  return converter.triggers, converter.channel_instruments
 end
 
 return PatternConverter

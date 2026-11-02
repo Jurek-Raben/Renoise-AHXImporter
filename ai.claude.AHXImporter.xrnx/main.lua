@@ -13,6 +13,15 @@ renoise.tool():add_menu_entry {
   invoke = Controller.start,
 }
 
+-- @build:skip-start
+renoise.tool():add_menu_entry {
+  name = 'Main Menu:Tools:AHX Importer:Macro Prototype',
+  invoke = function()
+    require('importer.macro_prototype').run()
+  end,
+}
+-- @build:skip-end
+
 renoise.tool():add_file_import_hook {
   category = 'song',
   extensions = { 'ahx', 'thx' },

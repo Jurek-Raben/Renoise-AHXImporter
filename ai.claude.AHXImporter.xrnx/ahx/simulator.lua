@@ -1,7 +1,7 @@
 -- Frame simulator: plays one AHX instrument from note-on, frame by frame, without audio.
 -- Port of the instrument part of `ProcessStep` (instrument trigger) and `ProcessFrame` / `PListCommandParse` of the
 -- reference replayer. Pattern commands, vibrato, hard cut and note cut/delay are not part of it: the pattern converter
--- handles pattern commands, vibrato and hard cut follow later.
+-- handles them (the volume per frame, including the hard cut release, see `PatternConverter:advance_volume`).
 --
 -- The result describes every frame (one phrase line each) and the loop the frames fall into, detected by comparing
 -- the complete voice state.
@@ -30,6 +30,10 @@ end
 ---@field fixed boolean the note is fixed (ignores the track note)
 ---@field perf_slide_period integer period offset of the performance list portamento
 ---@field volume integer 0..64, envelope · performance volume relative to the instrument volume
+---@field adsr number envelope volume (`ADSRVolume`, 0..64 · 256) after the frame
+---@field perf_sub_volume integer performance list volume 0..64
+---@field track_master_volume integer voice master volume set by the performance list, 0..64
+---@field note_scale number note volume set by the performance list relative to the instrument volume
 
 ---@class AhxSimulation
 ---@field frames AhxFrame[] 1-based, frame 1 = first frame after note-on
@@ -38,6 +42,17 @@ end
 
 ---@class AhxSimulationOptions
 ---@field square_offset integer|nil parameter of a track command 9xx on the trigger row
+
+---Output volume of a frame (0..64, relative to the instrument volume like `AhxFrame.volume`) for an envelope volume:
+---the replayer's `((((ADSRVolume >> 8) · PerfSubVolume) >> 6) · TrackMasterVolume) >> 6`, scaled by the note volume
+---the performance list set.
+---@param frame AhxFrame
+---@param adsr number envelope volume (0..64 · 256)
+---@return integer
+function Simulator.frame_volume(frame, adsr)
+  local volume = arshift(arshift(arshift(adsr, 8) * frame.perf_sub_volume, 6) * frame.track_master_volume, 6)
+  return math.max(0, math.min(0x40, math.floor(volume * frame.note_scale)))
+end
 
 ---Simulates an instrument.
 ---@param song AhxSong
@@ -336,21 +351,21 @@ function Simulator.run(song, instrument, options)
   for frame = 1, MAX_FRAMES do
     process_frame()
 
-    -- Output volume relative to the instrument volume (the pattern carries the note volume).
-    local volume = arshift(arshift(arshift(v.adsr_volume, 8) * v.perf_sub_volume, 6) * v.track_master_volume, 6)
-    if instrument.volume > 0 then
-      volume = math.floor(volume * v.note_max_volume / instrument.volume)
-    end
-
-    result.frames[frame] = {
+    -- Output volume relative to the instrument volume (the pattern converter applies the note volume).
+    local record = {
       waveform = v.waveform,
       filter_pos = v.filter_pos,
       square_pos = v.square_pos,
       instr_period = v.instr_period,
       fixed = v.fixed ~= 0,
       perf_slide_period = v.perf_slide_period,
-      volume = math.max(0, math.min(0x40, volume)),
+      adsr = v.adsr_volume,
+      perf_sub_volume = v.perf_sub_volume,
+      track_master_volume = v.track_master_volume,
+      note_scale = instrument.volume > 0 and v.note_max_volume / instrument.volume or 1,
     }
+    record.volume = Simulator.frame_volume(record, v.adsr_volume)
+    result.frames[frame] = record
 
     local key = signature()
     local previous = seen[key]
