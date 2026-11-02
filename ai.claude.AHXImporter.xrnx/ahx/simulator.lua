@@ -29,10 +29,11 @@ end
 ---@field instr_period integer performance list note (0 = none yet)
 ---@field fixed boolean the note is fixed (ignores the track note)
 ---@field perf_slide_period integer period offset of the performance list portamento
+---@field volume integer 0..64, envelope · performance volume relative to the instrument volume
 ---@field adsr number envelope volume (`ADSRVolume`, 0..64 · 256) after the frame
----@field perf_sub_volume integer performance list volume 0..64 (`PerfSubVolume`)
----@field note_max_set integer|nil the performance list set the voice's note volume (`NoteMaxVolume`) in this frame
----@field track_master_set integer|nil the performance list set the voice's master volume in this frame
+---@field perf_sub_volume integer performance list volume 0..64
+---@field track_master_volume integer voice master volume set by the performance list, 0..64
+---@field note_scale number note volume set by the performance list relative to the instrument volume
 
 ---@class AhxSimulation
 ---@field frames AhxFrame[] 1-based, frame 1 = first frame after note-on
@@ -42,15 +43,15 @@ end
 ---@class AhxSimulationOptions
 ---@field square_offset integer|nil parameter of a track command 9xx on the trigger row
 
----Output volume of a voice (0..64), with the replayer's integer arithmetic (`AudioVolume`, main volume 0x40):
----`((((((ADSRVolume >> 8) · NoteMaxVolume) >> 6) · PerfSubVolume) >> 6) · TrackMasterVolume) >> 6`.
+---Output volume of a frame (0..64, relative to the instrument volume like `AhxFrame.volume`) for an envelope volume:
+---the replayer's `((((ADSRVolume >> 8) · PerfSubVolume) >> 6) · TrackMasterVolume) >> 6`, scaled by the note volume
+---the performance list set.
+---@param frame AhxFrame
 ---@param adsr number envelope volume (0..64 · 256)
----@param note_max integer note volume 0..64
----@param perf_sub integer performance list volume 0..64
----@param track_master integer voice master volume 0..64
 ---@return integer
-function Simulator.output_volume(adsr, note_max, perf_sub, track_master)
-  return arshift(arshift(arshift(arshift(adsr, 8) * note_max, 6) * perf_sub, 6) * track_master, 6)
+function Simulator.frame_volume(frame, adsr)
+  local volume = arshift(arshift(arshift(adsr, 8) * frame.perf_sub_volume, 6) * frame.track_master_volume, 6)
+  return math.max(0, math.min(0x40, math.floor(volume * frame.note_scale)))
 end
 
 ---Simulates an instrument.
@@ -179,13 +180,11 @@ function Simulator.run(song, instrument, options)
             param = param - (0xa0 - 0x50)
             if param >= 0 and param <= 0x40 then
               v.track_master_volume = param
-              v.track_master_set = param
             end
           end
         end
       else
         v.note_max_volume = param
-        v.note_max_set = param
       end
     elseif fx == 7 then
       v.perf_speed = param
@@ -350,12 +349,10 @@ function Simulator.run(song, instrument, options)
   local seen = {}
 
   for frame = 1, MAX_FRAMES do
-    -- Volume commands of the performance list change the voice's note / master volume, which the pattern also sets:
-    -- they are reported as events of their frame and applied by the pattern converter.
-    v.note_max_set, v.track_master_set = nil, nil
     process_frame()
 
-    result.frames[frame] = {
+    -- Output volume relative to the instrument volume (the pattern converter applies the note volume).
+    local record = {
       waveform = v.waveform,
       filter_pos = v.filter_pos,
       square_pos = v.square_pos,
@@ -364,9 +361,11 @@ function Simulator.run(song, instrument, options)
       perf_slide_period = v.perf_slide_period,
       adsr = v.adsr_volume,
       perf_sub_volume = v.perf_sub_volume,
-      note_max_set = v.note_max_set,
-      track_master_set = v.track_master_set,
+      track_master_volume = v.track_master_volume,
+      note_scale = instrument.volume > 0 and v.note_max_volume / instrument.volume or 1,
     }
+    record.volume = Simulator.frame_volume(record, v.adsr_volume)
+    result.frames[frame] = record
 
     local key = signature()
     local previous = seen[key]

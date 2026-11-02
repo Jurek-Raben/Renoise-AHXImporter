@@ -196,13 +196,7 @@ become patterns and the pattern sequence.
   replayer. The value (output / 64) is written as lines-mode automation of the volume parameter of an *Instr.
   Macros device per track and instrument (`importer/macro_writer.lua`; a new device links to the selected
   instrument, its parameters are named like the macros); a change after a constant stretch gets a point on the
-  previous frame too, so the line only ramps between neighboring frames; a trigger (instrument) and a note cut are
-  hard steps instead (previous value 1/256 line before the frame): otherwise the old note, which keeps looping
-  silently (no note-offs), was faded in during the frame before the new note (heard as a short fade-in of drums).
-  The frame value applies from the frame's tick on, like the replayer (`PlayIRQ`: steps, frames, then the frame is
-  mixed); point times are tick times rounded down to 1/256 line, never behind the tick. The output volume uses the
-  replayer's integer formula (`Simulator.output_volume`), and volume commands of the performance list (6xx) overwrite
-  the voice's note / master volume in their frame (events of the simulation); every pattern gets a point on line 1 for
+  previous frame too, so the line only ramps between neighboring frames; every pattern gets a point on line 1 for
   the playing instrument and every instrument it sets. Phrases have no volume column, the pattern has no 0Mxx and no
   note-offs. The volume macro belongs to the instrument, so every track plays its own instances (see the instrument
   layout; before, two tracks fought over one macro and the PWM sounded chopped: syphus - galactic olympics).
