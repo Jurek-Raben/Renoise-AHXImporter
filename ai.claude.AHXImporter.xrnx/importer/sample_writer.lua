@@ -100,7 +100,7 @@ function SampleWriter.write_band_limited(sample, cycle, top_pitch, name, options
   local cycle_length = #cycle
   local cycles = Tables.SAMPLE_BUFFER_LENGTH / cycle_length
   local cycle_frequency = SAMPLE_RATE * 2 ^ ((top_pitch - BASE_NOTE) / 12) / cycle_length
-  local frames = BandLimit.render(cycle, cycle_frequency, cycle_length * factor, cycles)
+  local frames = BandLimit.render(cycle, cycle_frequency, cycle_length * factor, cycles, options.band_limit_roll_off)
   local frame_count = #frames
 
   if not buffer:create_sample_data(SAMPLE_RATE * factor, options.bit_depth, 1, frame_count) then

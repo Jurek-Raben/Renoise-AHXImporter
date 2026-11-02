@@ -1,7 +1,8 @@
 -- Band-limited rendering of a waveform cycle (no Renoise API): the cycle is resynthesized from its harmonics, keeping
 -- only those that stay below a cutoff at the highest pitch the sample is played at, so the waveform does not alias.
--- When harmonics are cut, the Gibbs ringing is softened with Lanczos sigma factors; when all fit, the cycle is
--- reconstructed exactly. The DC offset stays: removing it made narrow pulses peak far above the 8-bit range, and the
+-- A hard cut (or the exact reconstruction when all harmonics fit) rings like a very steep, resonant low-pass (Gibbs
+-- effect), so the top harmonics fade out over a raised-cosine roll-off instead (share `roll_off` of the kept
+-- harmonics; 0 = hard cut). The DC offset stays: removing it made narrow pulses peak far above the 8-bit range, and the
 -- scaling back made them much quieter (mobby - good day, bass AHX 02).
 
 local BandLimit = {}
@@ -42,21 +43,22 @@ end
 ---@param cycle_frequency number frequency of the cycle at the highest pitch it is played at (Hz)
 ---@param frames_per_cycle integer output frames per cycle
 ---@param cycles integer number of cycles in the output
+---@param roll_off number 0..1 share of the kept harmonics that fades out (0 = hard cut)
 ---@return number[] frames signed 8-bit range (scaled down when the ringing would exceed it)
 ---@return integer kept harmonics
-function BandLimit.render(cycle, cycle_frequency, frames_per_cycle, cycles)
+function BandLimit.render(cycle, cycle_frequency, frames_per_cycle, cycles, roll_off)
   local dc, cosines, sines = harmonics(cycle)
   local count = math.min(#cosines, math.max(1, math.floor(BandLimit.CUTOFF_HZ / cycle_frequency)))
-  local cut = count < #cosines
 
-  -- Lanczos sigma factors against ringing, only when the series is cut.
+  -- Raised-cosine roll-off: full level up to the start of the fade, then down to 0 just above the last harmonic.
+  local fade_start = count * (1 - math.max(0, math.min(1, roll_off)))
   local sigma = {}
   for k = 1, count do
-    if cut then
-      local x = math.pi * k / (count + 1)
-      sigma[k] = math.sin(x) / x
-    else
+    if k <= fade_start then
       sigma[k] = 1
+    else
+      local share = (k - fade_start) / (count + 1 - fade_start)
+      sigma[k] = 0.5 * (1 + math.cos(math.pi * share))
     end
   end
 

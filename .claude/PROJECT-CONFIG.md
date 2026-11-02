@@ -91,8 +91,8 @@ become patterns and the pattern sequence.
 - `importer/` – everything that touches the Renoise API:
   - `controller.lua` – workflow: parse → `ui/options_dialog.lua` → `song_creator.lua` (new song without template) →
     `process_slicer.lua` (sliced build with progress dialog, ported from SongMerger) → summary.
-  - `preferences.lua` – import options (interpolation, bit depth, sample rate, rendering, filter resonance, pattern
-    resolution, PWM crossfade) in the tool's `preferences.xml`.
+  - `preferences.lua` – import options (interpolation, bit depth, sample rate, rendering, band-limit roll-off, filter
+    resonance, pattern resolution, PWM crossfade) in the tool's `preferences.xml`.
   - `ui/widgets.lua` – shared dialog look (ported from SongMerger), `ui/options_dialog.lua` – import options.
   - `song_setup.lua` – four sequencer tracks (LRRL panning), no send/group tracks, Maximizer on the master, one
     instrument, one sequence slot.
@@ -182,7 +182,8 @@ become patterns and the pattern sequence.
   Rendering Original / Smoothed / Band-limited (default Smoothed, by ear): Original repeats every frame (sample and
   hold, like Paula); Smoothed interpolates between the frames (Catmull-Rom, wrapping around the loop); Band-limited
   (`ahx/band_limit.lua`) resynthesizes each cycle from its harmonics below 18 kHz at the highest pitch the sample is
-  played at (Lanczos sigma against ringing only when harmonics are cut, DC kept), one sample per octave of the played notes (one per sample when
+  played at, with a raised-cosine roll-off over the top harmonics (option "Roll-off" 0..100 %, default 50 %;
+  a hard cut rang like a steep resonant filter), DC kept, one sample per octave of the played notes (one per sample when
   that exceeds 255 samples; noise stays smoothed). Smoothed and band-limited render at least at 4×. Rejected for now: an Amiga output filter emulation (A500 RC / LED filter).
   Filter resonance slider 0..0.3 (default 0.136) for the Renoise-filter path.
   PWM crossfade slider 0..20 ms (0 = off, default 10 ms by ear): a volume AHDSR with attack = release = the crossfade time and new

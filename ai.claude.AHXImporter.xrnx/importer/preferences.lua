@@ -13,6 +13,7 @@ Preferences.RENDERINGS = { 'Original', 'Smoothed', 'Band-limited' }
 Preferences.LINES_PER_ROW = { 0, 1, 2, 4 }
 Preferences.MAX_FILTER_RESONANCE = 0.3
 Preferences.DEFAULT_FILTER_RESONANCE = 0.136
+Preferences.DEFAULT_ROLL_OFF = 0.5
 Preferences.MAX_CROSSFADE_MS = 20
 Preferences.DEFAULT_CROSSFADE_MS = 10
 
@@ -25,6 +26,7 @@ local document = renoise.Document.create('AHXImporterPreferences') {
   filter_resonance = Preferences.DEFAULT_FILTER_RESONANCE,
   lines_per_row = 0,
   crossfade_ms = Preferences.DEFAULT_CROSSFADE_MS,
+  band_limit_roll_off = Preferences.DEFAULT_ROLL_OFF,
 }
 
 renoise.tool().preferences = document
@@ -35,6 +37,7 @@ renoise.tool().preferences = document
 ---@field sample_rate_factor integer 1, 2 or 4 (multiple of the base rate 8363 Hz)
 ---@field rendering integer 1 = original, 2 = smoothed, 3 = band-limited (see Preferences.RENDERINGS)
 ---@field lines_per_row integer 0 (auto), 1, 2 or 4 pattern lines per AHX row (pattern resolution)
+---@field band_limit_roll_off number 0..1 share of the harmonics that fades out in band-limited rendering
 ---@field crossfade_ms integer 0..20 ms crossfade of phrase sample switches (0 = off)
 ---@field filter_resonance number 0..0.3, resonance of the Renoise filter path (share of the parameter range)
 
@@ -49,6 +52,7 @@ function Preferences.load()
     filter_resonance = document.filter_resonance.value,
     lines_per_row = document.lines_per_row.value,
     crossfade_ms = document.crossfade_ms.value,
+    band_limit_roll_off = document.band_limit_roll_off.value,
   }
 end
 
@@ -62,6 +66,7 @@ function Preferences.save(options)
   document.filter_resonance.value = options.filter_resonance
   document.lines_per_row.value = options.lines_per_row
   document.crossfade_ms.value = options.crossfade_ms
+  document.band_limit_roll_off.value = options.band_limit_roll_off
 end
 
 ---@param options AhxImportOptions
@@ -75,6 +80,7 @@ function Preferences.is_saved(options)
       and math.abs(saved.filter_resonance - options.filter_resonance) < 0.0005
       and saved.lines_per_row == options.lines_per_row
       and saved.crossfade_ms == options.crossfade_ms
+    and math.abs(saved.band_limit_roll_off - options.band_limit_roll_off) < 0.005
 end
 
 return Preferences

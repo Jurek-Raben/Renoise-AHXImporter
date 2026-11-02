@@ -15,6 +15,9 @@ local function crossfade_label(ms)
   return ms == 0 and 'off' or ('%d ms'):format(ms)
 end
 
+-- Index of the band-limited rendering in Preferences.RENDERINGS.
+local BAND_LIMITED = 3
+
 -- Base sample rate of the samples, see `SampleWriter`.
 local BASE_SAMPLE_RATE = 8363
 
@@ -65,6 +68,16 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
     vb.views.save_button.active = not saved
   end
 
+  -- The roll-off only applies to band-limited rendering. A disabled slider looks the same as an enabled one, so the
+  -- slider and its value are replaced by a note.
+  local function update_roll_off()
+    local band_limited = options.rendering == BAND_LIMITED
+    vb.views.roll_off_slider.active = band_limited
+    vb.views.roll_off_slider.visible = band_limited
+    vb.views.roll_off_text.visible = band_limited
+    vb.views.roll_off_note.visible = not band_limited
+  end
+
   local function cancel()
     close()
     if on_cancel then
@@ -82,6 +95,7 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
       filter_resonance = options.filter_resonance,
       lines_per_row = options.lines_per_row,
       crossfade_ms = options.crossfade_ms,
+      band_limit_roll_off = options.band_limit_roll_off,
     })
   end
 
@@ -129,8 +143,40 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
           value = options.rendering,
           notifier = function(value)
             options.rendering = value
+            update_roll_off()
             update_saved_mark()
           end,
+        }
+      ),
+      Widgets.labeled(
+        vb,
+        'Roll-off',
+        vb:row {
+          spacing = 6,
+          vb:slider {
+            id = 'roll_off_slider',
+            width = POPUP_WIDTH - 40,
+            min = 0,
+            max = 1,
+            default = Preferences.DEFAULT_ROLL_OFF,
+            value = options.band_limit_roll_off,
+            notifier = function(value)
+              options.band_limit_roll_off = value
+              vb.views.roll_off_text.text = ('%d %%'):format(math.floor(value * 100 + 0.5))
+              update_saved_mark()
+            end,
+          },
+          vb:text {
+            id = 'roll_off_text',
+            text = ('%d %%'):format(math.floor(options.band_limit_roll_off * 100 + 0.5)),
+            width = 40,
+          },
+          vb:text {
+            id = 'roll_off_note',
+            text = 'only with Band-limited',
+            style = 'disabled',
+            width = POPUP_WIDTH,
+          },
         }
       ),
       Widgets.labeled(
@@ -236,6 +282,7 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
   }
 
   update_saved_mark()
+  update_roll_off()
   close = Widgets.show_dialog('Import Options', content, { ['return'] = import, esc = cancel }, on_cancel)
 end
 
