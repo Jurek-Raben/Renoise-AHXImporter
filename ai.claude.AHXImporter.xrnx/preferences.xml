@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <AHXImporterPreferences doc_version="0">
-  <rendering>1.0</rendering>
-  <crossfade_ms>10</crossfade_ms>
-  <interpolation>4</interpolation>
-  <lines_per_row>0.0</lines_per_row>
-  <bit_depth>32</bit_depth>
   <sample_rate_factor>2</sample_rate_factor>
   <filter_resonance>0.13599999999999998</filter_resonance>
+  <crossfade_ms>10</crossfade_ms>
+  <lines_per_row>0.0</lines_per_row>
+  <bit_depth>32</bit_depth>
+  <interpolation>4</interpolation>
+  <rendering>2</rendering>
 </AHXImporterPreferences>
