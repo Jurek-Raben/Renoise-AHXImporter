@@ -412,8 +412,14 @@ local function simulation_frame(simulation, index)
   return frames[#frames]
 end
 
+-- Automation time between the two points of a hard step (the smallest automation time unit, 1/256 line).
+local STEP_TIME = 1 / 256
+
 ---Adds an automation point where the value of an instrument's macro changes. Automation uses lines mode: a change
----after a constant stretch gets a point on the previous frame too, so the line only ramps between neighboring frames.
+---after a constant stretch gets a point on the previous frame too, so the line only ramps between neighboring frames
+---(the AHX value changes once per frame). A hard step (trigger, note cut) gets its previous value 1/256 line before
+---the change instead: the new note must start at its own value, and the previous note (which keeps looping silently,
+---there are no note-offs) must not be faded in during the frame before.
 ---@param track { values: table, frames: table } last written value and its frame counter per instrument
 ---@param points table the channel's points of the segment
 ---@param instrument integer Renoise instrument index
@@ -422,7 +428,8 @@ end
 ---@param counter integer frame counter of this frame
 ---@param previous_time number|nil pattern time of the previous frame (nil at a segment start)
 ---@param time number pattern time of this frame
-local function emit_point(track, points, instrument, value, default, counter, previous_time, time)
+---@param hard boolean jump at this frame instead of a ramp from the previous frame
+local function emit_point(track, points, instrument, value, default, counter, previous_time, time, hard)
   local last = track.values[instrument]
   if last == nil then
     last = default
@@ -430,7 +437,9 @@ local function emit_point(track, points, instrument, value, default, counter, pr
   if last == value then
     return
   end
-  if last ~= nil and previous_time and track.frames[instrument] ~= counter - 1 then
+  if last ~= nil and hard and time - STEP_TIME >= 1 then
+    points[#points + 1] = { time = time - STEP_TIME, instrument = instrument, value = last }
+  elseif last ~= nil and previous_time and track.frames[instrument] ~= counter - 1 then
     points[#points + 1] = { time = previous_time, instrument = instrument, value = last }
   end
   points[#points + 1] = { time = time, instrument = instrument, value = value }
@@ -451,9 +460,11 @@ function PatternConverter:advance_volume(channel, step, transpose, times, data)
   local state = self.channels[channel]
   for frame = 0, self.tempo - 1 do
     local counter = self.frame_counter + frame
+    local hard = false
     if frame == state.step_delay then
       -- An instrument restarts the instrument (envelope, performance list); a note without instrument does not.
       if step.instrument > 0 then
+        hard = true
         state.simulation = self:simulation(step.instrument)
         state.simulation_frame = 0
         state.release = nil
@@ -479,6 +490,7 @@ function PatternConverter:advance_volume(channel, step, transpose, times, data)
         }
       else
         state.volume = 0
+        hard = true
       end
     end
 
@@ -492,12 +504,19 @@ function PatternConverter:advance_volume(channel, step, transpose, times, data)
     if simulation then
       state.simulation_frame = state.simulation_frame + 1
       local record = simulation_frame(simulation, state.simulation_frame)
+      -- The performance list runs after the volume slide and overwrites the voice's note / master volume.
+      if record.note_max_set then
+        state.volume = record.note_max_set
+      end
+      if record.track_master_set then
+        state.track_master_volume = record.track_master_set
+      end
       local side = self.filter_sides[state.instrument]
       if side then
         local track_note = math.max(0, math.min(60, state.frame_track_notes[frame] + transpose))
         cutoff = FilterPath.cutoff(record, side, track_note, state.frame_slides[frame])
       end
-      local instrument_volume = record.volume
+      local adsr = record.adsr
       local release = state.release
       if release then
         if release.frames > 0 then
@@ -507,9 +526,9 @@ function PatternConverter:advance_volume(channel, step, transpose, times, data)
             release.adsr = release.target
           end
         end
-        instrument_volume = Simulator.frame_volume(record, release.adsr)
+        adsr = release.adsr
       end
-      output = instrument_volume * state.volume * state.track_master_volume / (FULL_VOLUME * FULL_VOLUME)
+      output = Simulator.output_volume(adsr, state.volume, record.perf_sub_volume, state.track_master_volume)
     end
 
     -- (`song.instruments[0]` is the replayer's empty instrument.)
@@ -518,10 +537,11 @@ function PatternConverter:advance_volume(channel, step, transpose, times, data)
     if instrument > 0 then
       local previous_time = frame > 0 and times[frame - 1] or self.previous_time
       local time = times[frame]
-      local value = math.floor(output + 0.5) / FULL_VOLUME
-      emit_point(state.volume_track, data.volumes[channel], instrument, value, 0, counter, previous_time, time)
+      local value = math.max(0, math.min(FULL_VOLUME, output)) / FULL_VOLUME
+      local volumes, cutoffs = data.volumes[channel], data.cutoffs[channel]
+      emit_point(state.volume_track, volumes, instrument, value, 0, counter, previous_time, time, hard)
       if cutoff ~= nil then
-        emit_point(state.cutoff_track, data.cutoffs[channel], instrument, cutoff, nil, counter, previous_time, time)
+        emit_point(state.cutoff_track, cutoffs, instrument, cutoff, nil, counter, previous_time, time, hard)
       end
     end
   end
@@ -765,10 +785,12 @@ function PatternConverter:convert(segment, segment_index)
       cells[channel] = self:convert_step(channel, steps[row], position.transpose[channel - 1], next_step.instrument)
     end
 
-    -- Pattern time of every frame of the row (automation times are quantized to 1/256 line).
+    -- Pattern time of every frame of the row: tick `frame` of the row (a tick is a frame). Automation times are
+    -- quantized to 1/256 line; rounded down, so a point is never behind the tick of its frame (Renoise updates the
+    -- automation per tick).
     local times = {}
     for frame = 0, self.tempo - 1 do
-      times[frame] = math.floor((line + frame * self.lines_per_row / self.tempo) * 256 + 0.5) / 256
+      times[frame] = line + math.floor(frame * self.lines_per_row * 256 / self.tempo) / 256
     end
     for channel = 1, 4 do
       local step = song.tracks[position.track[channel - 1]][row]
