@@ -78,6 +78,7 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
       interpolation = options.interpolation,
       bit_depth = options.bit_depth,
       sample_rate_factor = options.sample_rate_factor,
+      rendering = options.rendering,
       filter_resonance = options.filter_resonance,
       lines_per_row = options.lines_per_row,
       crossfade_ms = options.crossfade_ms,
@@ -115,6 +116,19 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
           value = index_of(Preferences.BIT_DEPTHS, options.bit_depth),
           notifier = function(value)
             options.bit_depth = Preferences.BIT_DEPTHS[value]
+            update_saved_mark()
+          end,
+        }
+      ),
+      Widgets.labeled(
+        vb,
+        'Rendering',
+        vb:popup {
+          width = POPUP_WIDTH,
+          items = Preferences.RENDERINGS,
+          value = options.rendering,
+          notifier = function(value)
+            options.rendering = value
             update_saved_mark()
           end,
         }

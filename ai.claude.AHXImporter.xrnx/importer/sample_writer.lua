@@ -1,5 +1,8 @@
 -- Writes AHX waveform buffers into Renoise samples.
 
+local BandLimit = require('ahx.band_limit')
+local Tables = require('ahx.tables')
+
 local SampleWriter = {}
 
 -- Rate at which a sample plays at its base note C-4. AHX note C-3 plays at 3579545.25 / 856 ≈ 4181.7 Hz (NTSC Paula),
@@ -8,28 +11,12 @@ local SampleWriter = {}
 local SAMPLE_RATE = 8363
 local BASE_NOTE = 48
 
----Fills a sample with a looped waveform buffer.
+---Loop, interpolation and playback properties shared by all renderings.
 ---@param sample renoise.Sample
----@param frames number[] signed 8-bit values
 ---@param name string
----@param options AhxImportOptions interpolation, bit depth and sample rate factor
-function SampleWriter.write(sample, frames, name, options)
-  local buffer = sample.sample_buffer
-  -- A higher sample rate repeats every frame (sample and hold), so the waveform and the pitch stay the same, and 0Sxx
-  -- (xx/256 of the length) still addresses the same frames of the original 256-frame buffer.
-  local factor = options.sample_rate_factor
-  local frame_count = #frames * factor
-
-  if not buffer:create_sample_data(SAMPLE_RATE * factor, options.bit_depth, 1, frame_count) then
-    error('Out of memory while creating sample "' .. name .. '"')
-  end
-
-  buffer:prepare_sample_data_changes(false)
-  for i = 1, frame_count do
-    buffer:set_sample_data(1, i, frames[math.floor((i - 1) / factor) + 1] / 128)
-  end
-  buffer:finalize_sample_data_changes()
-
+---@param options AhxImportOptions
+---@param frame_count integer
+local function apply_properties(sample, name, options, frame_count)
   sample.name = name
   sample.interpolation_mode = options.interpolation
   sample.oversample_enabled = false
@@ -43,6 +30,89 @@ function SampleWriter.write(sample, frames, name, options)
   sample.transpose = 0
   sample.fine_tune = 0
   sample.sample_mapping.base_note = BASE_NOTE
+end
+
+-- Smoothed rendering needs frames in between to interpolate; at factor 1 it renders at this factor.
+local SMOOTHED_MIN_FACTOR = 4
+
+---Value between frames of a looped buffer (Catmull-Rom spline, wrapping around so the loop stays seamless).
+---@param frames number[]
+---@param position number 0-based position in frames
+---@return number
+local function cubic(frames, position)
+  local count = #frames
+  local base = math.floor(position)
+  local t = position - base
+  local p0 = frames[(base - 1) % count + 1]
+  local p1 = frames[base % count + 1]
+  local p2 = frames[(base + 1) % count + 1]
+  local p3 = frames[(base + 2) % count + 1]
+  return p1 + 0.5 * t * (p2 - p0 + t * (2 * p0 - 5 * p1 + 4 * p2 - p3 + t * (3 * (p1 - p2) + p3 - p0)))
+end
+
+---Fills a sample with a looped waveform buffer.
+---@param sample renoise.Sample
+---@param frames number[] signed 8-bit values
+---@param name string
+---@param options AhxImportOptions interpolation, bit depth, sample rate factor and rendering
+function SampleWriter.write(sample, frames, name, options)
+  local buffer = sample.sample_buffer
+  -- A higher sample rate keeps waveform and pitch, and 0Sxx (xx/256 of the length) still addresses the same frames of
+  -- the original 256-frame buffer. Original rendering repeats every frame (sample and hold, like Paula); smoothed
+  -- rendering interpolates between the frames, which rounds off the edges.
+  local smoothed = options.rendering == 2
+  local factor = options.sample_rate_factor
+  if smoothed then
+    factor = math.max(factor, SMOOTHED_MIN_FACTOR)
+  end
+  local frame_count = #frames * factor
+
+  if not buffer:create_sample_data(SAMPLE_RATE * factor, options.bit_depth, 1, frame_count) then
+    error('Out of memory while creating sample "' .. name .. '"')
+  end
+
+  buffer:prepare_sample_data_changes(false)
+  for i = 1, frame_count do
+    local value
+    if smoothed then
+      value = math.max(-128, math.min(127, cubic(frames, (i - 1) / factor)))
+    else
+      value = frames[math.floor((i - 1) / factor) + 1]
+    end
+    buffer:set_sample_data(1, i, value / 128)
+  end
+  buffer:finalize_sample_data_changes()
+
+  apply_properties(sample, name, options, frame_count)
+end
+
+---Fills a sample with whole cycles resynthesized band-limited for the highest pitch they are played at (no aliasing).
+---Same length and loop layout as the other renderings (256 original frames, at least 4× the rate), so the phase
+---offsets (0Sxx) of the phrases stay valid.
+---@param sample renoise.Sample
+---@param cycle number[] one waveform cycle, signed 8-bit values
+---@param top_pitch number highest Renoise note (with fine tune) the sample is played at
+---@param name string
+---@param options AhxImportOptions
+function SampleWriter.write_band_limited(sample, cycle, top_pitch, name, options)
+  local buffer = sample.sample_buffer
+  local factor = math.max(options.sample_rate_factor, SMOOTHED_MIN_FACTOR)
+  local cycle_length = #cycle
+  local cycles = Tables.SAMPLE_BUFFER_LENGTH / cycle_length
+  local cycle_frequency = SAMPLE_RATE * 2 ^ ((top_pitch - BASE_NOTE) / 12) / cycle_length
+  local frames = BandLimit.render(cycle, cycle_frequency, cycle_length * factor, cycles)
+  local frame_count = #frames
+
+  if not buffer:create_sample_data(SAMPLE_RATE * factor, options.bit_depth, 1, frame_count) then
+    error('Out of memory while creating sample "' .. name .. '"')
+  end
+  buffer:prepare_sample_data_changes(false)
+  for i = 1, frame_count do
+    buffer:set_sample_data(1, i, frames[i] / 128)
+  end
+  buffer:finalize_sample_data_changes()
+
+  apply_properties(sample, name, options, frame_count)
 end
 
 return SampleWriter

@@ -99,6 +99,14 @@ local function phrases_switch_samples(phrases, variants)
   return false
 end
 
+---@class AhxSampleKey
+---@field key string
+---@field state_index integer
+---@field fine_index integer
+---@field phrase AhxPhraseData first phrase that uses the sample
+---@field first boolean copy for the phrase's first line (no fade-in)
+---@field top_note integer highest note the sample is played at (band limit)
+
 ---Distinct sample keys (waveform state + fine tune) of all phrases, in order of first use. With `per_phrase`, every
 ---phrase gets samples of its own (the Renoise-filter path needs a cutoff envelope per note). With `separate_first`,
 ---the sample of a phrase's first line is a copy of its own (marked `first`), so the PWM crossfade can leave the note
@@ -107,32 +115,47 @@ end
 ---@param variants { data: AhxPhraseData }[]
 ---@param per_phrase boolean
 ---@param separate_first boolean
----@return { key: string, state_index: integer, fine_index: integer, phrase: AhxPhraseData, first: boolean }[]
-local function collect_sample_keys(phrases, variants, per_phrase, separate_first)
-  local keys, seen = {}, {}
+---@param per_octave boolean band-limited rendering: one sample per octave of the played note
+---@return AhxSampleKey[]
+local function collect_sample_keys(phrases, variants, per_phrase, separate_first, per_octave)
+  local keys, by_key = {}, {}
   local phrase_number = 0
   local function collect(data)
     phrase_number = phrase_number + 1
+    local current = nil
     for index = 1, data.number_of_lines do
       local line = data.lines[index]
       if line and line.sample_key then
-        if per_phrase then
-          line.sample_key = line.state_index .. ':' .. line.fine_index .. '#' .. phrase_number
+        if line.glide and current then
+          -- A glide keeps the playing sample (no retrigger).
+          line.sample_key = current.key
+        else
+          if per_phrase then
+            line.sample_key = line.state_index .. ':' .. line.fine_index .. '#' .. phrase_number
+          end
+          if per_octave then
+            line.sample_key = line.sample_key .. '@' .. math.floor(line.note / 12)
+          end
+          local first = separate_first and index == 1
+          if first then
+            line.sample_key = line.sample_key .. '|first'
+          end
+          current = by_key[line.sample_key]
+          if not current then
+            current = {
+              key = line.sample_key,
+              state_index = line.state_index,
+              fine_index = line.fine_index,
+              phrase = data,
+              first = first,
+              top_note = line.note,
+            }
+            by_key[line.sample_key] = current
+            keys[#keys + 1] = current
+          end
         end
-        local first = separate_first and index == 1
-        if first then
-          line.sample_key = line.sample_key .. '|first'
-        end
-        if not seen[line.sample_key] then
-          seen[line.sample_key] = true
-          keys[#keys + 1] = {
-            key = line.sample_key,
-            state_index = line.state_index,
-            fine_index = line.fine_index,
-            phrase = data,
-            first = first,
-          }
-        end
+        -- Highest note the sample is played at (band limit).
+        current.top_note = math.max(current.top_note, line.note)
       end
     end
   end
@@ -178,6 +201,8 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
   -- pairs than the phrase instrument column can address, the fine tune gets coarser.
   local fine_steps = FINE_STEPS_PER_SEMITONE
   local phrases, variants, sample_keys, crossfade_ms
+  local band_limited = options.rendering == 3
+  local per_octave = band_limited
   while true do
     phrases, variants =
       build_phrases(simulations, state_set, simulation_by_offset, usage, frames_per_second, fine_steps)
@@ -192,9 +217,18 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
     then
       crossfade_ms = options.crossfade_ms
     end
-    sample_keys = collect_sample_keys(phrases, variants, filter_side ~= nil, crossfade_ms > 0)
-    if #sample_keys <= WaveStates.MAX_STATES or fine_steps == 1 then
+    sample_keys = collect_sample_keys(phrases, variants, filter_side ~= nil, crossfade_ms > 0, per_octave)
+    if #sample_keys <= WaveStates.MAX_STATES then
       break
+    end
+    if fine_steps == 1 then
+      if not per_octave then
+        break
+      end
+      -- Band-limited per octave does not fit: one band limit per sample (for its highest note) instead.
+      per_octave = false
+      fine_steps = FINE_STEPS_PER_SEMITONE * 2
+      report('band-limited rendering per octave reduced (too many samples)')
     end
     fine_steps = fine_steps / 2
     ProcessSlicer.step(('Instrument %02d: reducing fine tune'):format(number))
@@ -213,7 +247,6 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
   local sample_index = {}
   for index, key in ipairs(sample_keys) do
     local state = state_set.states[key.state_index]
-    local frames = Waves.voice_buffer(state.waveform, state.filter_pos, state.wave_length, state.square_pos)
 
     local sample = target:insert_sample_at(index)
     local sample_name = WaveStates.describe(state)
@@ -223,7 +256,13 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
     if key.first then
       sample_name = sample_name .. ' (start)'
     end
-    SampleWriter.write(sample, frames, sample_name, options)
+    if band_limited and state.waveform ~= Waves.NOISE and state.wave_length <= 5 then
+      local cycle = Waves.cycle(state.waveform, state.filter_pos, state.wave_length, state.square_pos)
+      SampleWriter.write_band_limited(sample, cycle, key.top_note + key.fine_index / fine_steps, sample_name, options)
+    else
+      local frames = Waves.voice_buffer(state.waveform, state.filter_pos, state.wave_length, state.square_pos)
+      SampleWriter.write(sample, frames, sample_name, options)
+    end
     -- sample.fine_tune has 128 steps per semitone (verified).
     sample.fine_tune = math.floor(key.fine_index * FINE_TUNE_PER_SEMITONE / fine_steps + 0.5)
     -- The note volume is the channel volume of the pattern (0Mxx), the envelope comes from the phrase.

@@ -85,13 +85,14 @@ become patterns and the pattern sequence.
     changes written, phase-continuous sample offsets.
   - `filter_path.lua` – Renoise-filter path decision and AHX cutoff per frame.
   - `resolution.lua` – automatic pattern resolution and the 0Vxy vibrato speed.
+  - `band_limit.lua` – band-limited resynthesis of a waveform cycle.
   - `note_usage.lua` – the notes each instrument is triggered with (one phrase per note) and its 9xx note/offset
     variants.
 - `importer/` – everything that touches the Renoise API:
   - `controller.lua` – workflow: parse → `ui/options_dialog.lua` → `song_creator.lua` (new song without template) →
     `process_slicer.lua` (sliced build with progress dialog, ported from SongMerger) → summary.
-  - `preferences.lua` – import options (interpolation, bit depth, sample rate, filter resonance, pattern resolution,
-    PWM crossfade) in the tool's `preferences.xml`.
+  - `preferences.lua` – import options (interpolation, bit depth, sample rate, rendering, filter resonance, pattern
+    resolution, PWM crossfade) in the tool's `preferences.xml`.
   - `ui/widgets.lua` – shared dialog look (ported from SongMerger), `ui/options_dialog.lua` – import options.
   - `song_setup.lua` – four sequencer tracks (LRRL panning), no send/group tracks, Maximizer on the master, one
     instrument, one sequence slot.
@@ -113,7 +114,7 @@ become patterns and the pattern sequence.
   - Renoise-filter path (`ahx/filter_path.lua`, `importer/filter_writer.lua`): when all simulated filter positions
     stay on one side (low-pass 1..32 or high-pass 32..63, 32 = open) and nothing else changes the sample during a
     note (waveform, pulse width, performance portamento), the samples are unfiltered and every phrase gets a sample of
-    its own with its own modulation set: low-/high-pass filter (`LP Clean` etc.), resonance from the import options (0..0.3, default 0.2), cutoff input at maximum and a
+    its own with its own modulation set: low-/high-pass filter (`LP Clean` etc.), resonance from the import options (0..0.3, default 0.136), cutoff input at maximum and a
     cutoff envelope (operator multiply, points mode, one point per frame, loop = simulation loop). The cutoff per
     frame is the AHX filter's: fc = fs · asin(f / 2) / π with f = (8 + 3 · step) · 1.25 / 100 and fs = Paula rate of
     the frame's pitch. Hz are mapped to the normalized cutoff by probing the cutoff parameter's value strings.
@@ -178,7 +179,12 @@ become patterns and the pattern sequence.
 - Every import starts with the options dialog: sample interpolation (none / linear / cubic / sinc, default none) and
   sample resolution (8 / 16 / 32 bit, default 8) and sample rate (8363 / 16726 / 33452 Hz = 1× / 2× / 4×, default
   1×; higher rates repeat every frame, so waveform, pitch and 0Sxx offsets stay the same).
-  Filter resonance slider 0..0.3 (default 0.2) for the Renoise-filter path.
+  Rendering Original / Smoothed / Band-limited (default Smoothed, by ear): Original repeats every frame (sample and
+  hold, like Paula); Smoothed interpolates between the frames (Catmull-Rom, wrapping around the loop); Band-limited
+  (`ahx/band_limit.lua`) resynthesizes each cycle from its harmonics below 18 kHz at the highest pitch the sample is
+  played at (Lanczos sigma against ringing only when harmonics are cut, DC kept), one sample per octave of the played notes (one per sample when
+  that exceeds 255 samples; noise stays smoothed). Smoothed and band-limited render at least at 4×. Rejected for now: an Amiga output filter emulation (A500 RC / LED filter).
+  Filter resonance slider 0..0.3 (default 0.136) for the Renoise-filter path.
   PWM crossfade slider 0..20 ms (0 = off, default 10 ms by ear): a volume AHDSR with attack = release = the crossfade time and new
   note action "note off", so every sample switch of a phrase crossfades (against the ring-modulation-like roughness of
   PWM). Only for instruments whose phrases switch samples, not for instruments with hard cut release (they keep
