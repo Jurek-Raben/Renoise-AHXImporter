@@ -15,6 +15,27 @@ local function crossfade_label(ms)
   return ms == 0 and 'off' or ('%d ms'):format(ms)
 end
 
+-- Tooltips of the options (English).
+local TOOLTIPS = {
+  interpolation = 'How Renoise resamples the samples when playing them. None keeps the hard, aliased sound of the '
+    .. 'Amiga; Linear, Cubic and Sinc sound smoother.',
+  bit_depth = 'Bit depth of the created samples. AHX waveforms are 8 bit; 16 and 32 bit keep the smoothed and '
+    .. 'band-limited renderings finer.',
+  rendering = 'How the waveforms are rendered into the samples. Original: every value repeated like the Amiga (hard '
+    .. 'edges). Smoothed: cubic interpolation between the values (rounder edges). Band-limited: rebuilt from '
+    .. 'harmonics without aliasing at the played pitch.',
+  roll_off = 'Band-limited only: share of the harmonics that fades out softly. 0 % cuts hard (can ring like a '
+    .. 'steep resonant filter), higher values sound softer.',
+  sample_rate = 'Sample rate of the created samples (multiple of the Amiga rate of C-4). Higher rates give the '
+    .. 'smoothing room; pitch and timing stay the same.',
+  crossfade = 'Crossfade of the sample switches inside a phrase (pulse width modulation, filter steps). Smooths the '
+    .. 'rough, ring-modulation-like sound of fast switches. 0 = off. The note start is never faded in.',
+  resolution = "Pattern lines per AHX row. Renoise's vibrato speed follows the lines, so slow songs need more lines "
+    .. 'for fast vibratos. Auto picks the smallest resolution that fits all vibratos.',
+  resonance = 'Resonance of the Renoise filter for filter sweeps that are played by the Renoise filter instead of '
+    .. 'baked into the samples.',
+}
+
 -- Index of the band-limited rendering in Preferences.RENDERINGS.
 local BAND_LIMITED = 3
 
@@ -114,6 +135,7 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
         vb:popup {
           width = POPUP_WIDTH,
           items = Preferences.INTERPOLATIONS,
+          tooltip = TOOLTIPS.interpolation,
           value = options.interpolation,
           notifier = function(value)
             options.interpolation = value
@@ -127,6 +149,7 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
         vb:popup {
           width = POPUP_WIDTH,
           items = bit_depth_labels,
+          tooltip = TOOLTIPS.bit_depth,
           value = index_of(Preferences.BIT_DEPTHS, options.bit_depth),
           notifier = function(value)
             options.bit_depth = Preferences.BIT_DEPTHS[value]
@@ -140,6 +163,7 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
         vb:popup {
           width = POPUP_WIDTH,
           items = Preferences.RENDERINGS,
+          tooltip = TOOLTIPS.rendering,
           value = options.rendering,
           notifier = function(value)
             options.rendering = value
@@ -155,6 +179,7 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
           spacing = 6,
           vb:slider {
             id = 'roll_off_slider',
+            tooltip = TOOLTIPS.roll_off,
             width = POPUP_WIDTH - 40,
             min = 0,
             max = 1,
@@ -185,6 +210,7 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
         vb:popup {
           width = POPUP_WIDTH,
           items = sample_rate_labels,
+          tooltip = TOOLTIPS.sample_rate,
           value = index_of(Preferences.SAMPLE_RATE_FACTORS, options.sample_rate_factor),
           notifier = function(value)
             options.sample_rate_factor = Preferences.SAMPLE_RATE_FACTORS[value]
@@ -192,10 +218,6 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
           end,
         }
       ),
-      vb:text {
-        text = 'None keeps the hard, aliased sound of the Amiga.',
-        style = 'disabled',
-      },
       Widgets.labeled(
         vb,
         'PWM crossfade',
@@ -205,6 +227,7 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
             width = POPUP_WIDTH - 40,
             min = 0,
             max = Preferences.MAX_CROSSFADE_MS,
+            tooltip = TOOLTIPS.crossfade,
             default = Preferences.DEFAULT_CROSSFADE_MS,
             value = options.crossfade_ms,
             notifier = function(value)
@@ -228,6 +251,7 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
         vb:popup {
           width = POPUP_WIDTH,
           items = resolution_labels,
+          tooltip = TOOLTIPS.resolution,
           value = index_of(Preferences.LINES_PER_ROW, options.lines_per_row),
           notifier = function(value)
             options.lines_per_row = Preferences.LINES_PER_ROW[value]
@@ -250,6 +274,7 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
             width = POPUP_WIDTH - 40,
             min = 0,
             max = Preferences.MAX_FILTER_RESONANCE,
+            tooltip = TOOLTIPS.resonance,
             default = Preferences.DEFAULT_FILTER_RESONANCE,
             value = options.filter_resonance,
             notifier = function(value)
