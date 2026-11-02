@@ -13,9 +13,21 @@ local ProcessSlicer = require('importer.process_slicer')
 local SongCreator = require('importer.song_creator')
 local SongSetup = require('importer.song_setup')
 local OptionsDialog = require('importer.ui.options_dialog')
+local Widgets = require('importer.ui.widgets')
 local Util = require('importer.util')
 
 local Controller = {}
+
+---@param song AhxSong
+---@param file_name string
+---@return string
+local function song_name(song, file_name)
+  local name = song.name:match('^%s*(.-)%s*$')
+  if name == '' then
+    name = Widgets.basename(file_name):gsub('%.[^.]*$', '')
+  end
+  return name
+end
 
 ---Builds the whole song. Runs inside the process slicer.
 ---@param song AhxSong
@@ -28,7 +40,7 @@ local function build_song(song, file_name, options)
 
   ProcessSlicer.step('Preparing song', true)
   SongSetup.prepare()
-  rns.name = song.name
+  rns.name = song_name(song, file_name)
   rns.comments = { ('Imported from %s (THX%d) by %s'):format(file_name, song.revision, Util.TOOL_NAME) }
 
   local unsupported = {}
@@ -60,6 +72,8 @@ local function build_song(song, file_name, options)
 
   rns.selected_instrument_index = 1
   rns.selected_sequence_index = 1
+  -- Set again at the end: the song name is the AHX song name (the file name when it is empty).
+  rns.name = song_name(song, file_name)
   return summary
 end
 
@@ -133,7 +147,7 @@ function Controller.build(song, file_name, options)
     end
     new_document_observable:add_notifier(on_new_document)
 
-    ProcessSlicer.run('Importing AHX Song', true, build_song, function(ok, result)
+    ProcessSlicer.run(('Importing "%s"'):format(Widgets.basename(file_name)), true, build_song, function(ok, result)
       if new_document_observable:has_notifier(on_new_document) then
         new_document_observable:remove_notifier(on_new_document)
       end

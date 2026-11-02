@@ -20,6 +20,8 @@ Preferences.DEFAULT_CROSSFADE_MS = 10
 local document = renoise.Document.create('AHXImporterPreferences') {
   -- Index into INTERPOLATIONS, equal to renoise.Sample.INTERPOLATE_* (1 = none).
   interpolation = 1,
+  -- Renoise's sample option "Oversample" (band-limited playback of the interpolation).
+  oversample = true,
   bit_depth = 8,
   sample_rate_factor = 4,
   rendering = 2,
@@ -33,6 +35,7 @@ renoise.tool().preferences = document
 
 ---@class AhxImportOptions
 ---@field interpolation integer renoise.Sample.INTERPOLATE_* (1..4)
+---@field oversample boolean sample option "Oversample"
 ---@field bit_depth integer 8, 16 or 32
 ---@field sample_rate_factor integer 1, 2 or 4 (multiple of the base rate 8363 Hz)
 ---@field rendering integer 1 = original, 2 = smoothed, 3 = band-limited (see Preferences.RENDERINGS)
@@ -46,6 +49,7 @@ renoise.tool().preferences = document
 function Preferences.load()
   return {
     interpolation = document.interpolation.value,
+    oversample = document.oversample.value,
     bit_depth = document.bit_depth.value,
     sample_rate_factor = document.sample_rate_factor.value,
     rendering = document.rendering.value,
@@ -60,6 +64,7 @@ end
 ---@param options AhxImportOptions
 function Preferences.save(options)
   document.interpolation.value = options.interpolation
+  document.oversample.value = options.oversample
   document.bit_depth.value = options.bit_depth
   document.sample_rate_factor.value = options.sample_rate_factor
   document.rendering.value = options.rendering
@@ -74,6 +79,7 @@ end
 function Preferences.is_saved(options)
   local saved = Preferences.load()
   return saved.interpolation == options.interpolation
+      and saved.oversample == options.oversample
       and saved.bit_depth == options.bit_depth
       and saved.sample_rate_factor == options.sample_rate_factor
       and saved.rendering == options.rendering

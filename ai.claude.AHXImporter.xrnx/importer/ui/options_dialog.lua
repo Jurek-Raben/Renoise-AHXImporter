@@ -19,6 +19,8 @@ end
 local TOOLTIPS = {
   interpolation = 'How Renoise resamples the samples when playing them. None keeps the hard, aliased sound of the '
     .. 'Amiga; Linear, Cubic and Sinc sound smoother.',
+  oversample = 'Enables the Oversample option of the samples: Renoise plays them oversampled (band-limited), which '
+    .. 'reduces aliasing at high pitches.',
   bit_depth = 'Bit depth of the created samples. AHX waveforms are 8 bit; 16 and 32 bit keep the smoothed and '
     .. 'band-limited renderings finer.',
   rendering = 'How the waveforms are rendered into the samples. Original: every value repeated like the Amiga (hard '
@@ -110,6 +112,7 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
     close()
     on_import({
       interpolation = options.interpolation,
+      oversample = options.oversample,
       bit_depth = options.bit_depth,
       sample_rate_factor = options.sample_rate_factor,
       rendering = options.rendering,
@@ -141,6 +144,21 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
             options.interpolation = value
             update_saved_mark()
           end,
+        }
+      ),
+      Widgets.labeled(
+        vb,
+        'Oversample',
+        vb:row {
+          vb:checkbox {
+            tooltip = TOOLTIPS.oversample,
+            value = options.oversample,
+            notifier = function(value)
+              options.oversample = value
+              update_saved_mark()
+            end,
+          },
+          vb:text { text = 'oversampled / band-limited playback', style = 'disabled' },
         }
       ),
       Widgets.labeled(

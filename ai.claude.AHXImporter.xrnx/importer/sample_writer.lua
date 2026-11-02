@@ -19,7 +19,7 @@ local BASE_NOTE = 48
 local function apply_properties(sample, name, options, frame_count)
   sample.name = name
   sample.interpolation_mode = options.interpolation
-  sample.oversample_enabled = false
+  sample.oversample_enabled = options.oversample
   -- Every sample switch of a phrase is a new note; the previous one must stop at once (an AHX voice plays one
   -- waveform at a time). With "note off" as new note action, the release of the hard cut AHDSR let the old notes
   -- fade out underneath and modulated the volume (syphus - better days, bass on AHX 1).

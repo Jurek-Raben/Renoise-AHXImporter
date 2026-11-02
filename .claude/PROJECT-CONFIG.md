@@ -92,7 +92,7 @@ become patterns and the pattern sequence.
 - `importer/` – everything that touches the Renoise API:
   - `controller.lua` – workflow: parse → `ui/options_dialog.lua` → `song_creator.lua` (new song without template) →
     `process_slicer.lua` (sliced build with progress dialog, ported from SongMerger) → summary.
-  - `preferences.lua` – import options (interpolation, bit depth, sample rate, rendering, band-limit roll-off, filter
+  - `preferences.lua` – import options (interpolation, oversample, bit depth, sample rate, rendering, band-limit roll-off, filter
     resonance, pattern resolution, PWM crossfade) in the tool's `preferences.xml`.
   - `ui/widgets.lua` – shared dialog look (ported from SongMerger), `ui/options_dialog.lua` – import options.
   - `song_setup.lua` – four sequencer tracks (LRRL panning), no send/group tracks, Maximizer on the master, one
@@ -126,7 +126,9 @@ become patterns and the pattern sequence.
   barely audible, did not fix rough PWM/filter steps.)
 - Pitch: AHX note n (1..60, C-1..B-5) maps to Renoise note n + 11 (C-1 = 12). Samples use the NTSC Paula rate of
   AHX note C-3 (3579545.25 / 856 ≈ 4181.7 Hz) one octave up, i.e. 8363 Hz at base note C-4.
-- An import always creates a new song (`new_song_no_template`, Renoise asks to save the current one). No empty
+- An import always creates a new song (`new_song_no_template`, Renoise asks to save the current one). The song name
+  is the AHX song name (trimmed; the file name without extension when empty), set at the start and again at the end
+  of the build. The progress dialog says 'Importing "<file name>"...'. No empty
   instrument slots: AHX instrument n is Renoise instrument n, the song's default instrument is reused.
 - Each sequence segment becomes one pattern (lines = played rows); identical patterns are reused in the sequence.
   The sequence loop range is set to the song's loop point.
@@ -179,7 +181,8 @@ become patterns and the pattern sequence.
 - Not converted yet (reported in the scripting console): 9xx without trigger.
 - Instruments get a default volume of -6 dB (four full-scale voices clip otherwise). The master gets a Renoise
   Maximizer with threshold -0.5 dB.
-- Every import starts with the options dialog: sample interpolation (none / linear / cubic / sinc, default none) and
+- Every import starts with the options dialog: sample interpolation (none / linear / cubic / sinc, default none),
+  the sample option "Oversample" (checkbox, default on) and
   sample resolution (8 / 16 / 32 bit, default 8) and sample rate (8363 / 16726 / 33452 Hz = 1× / 2× / 4×, default
   4×; higher rates repeat every frame, so waveform, pitch and 0Sxx offsets stay the same).
   Rendering Original / Smoothed / Band-limited (default Smoothed, by ear): Original repeats every frame (sample and
