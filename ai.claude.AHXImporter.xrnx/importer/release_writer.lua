@@ -5,6 +5,8 @@
 --     old sample over a few ms while the new one fades in with the same attack, which smooths the switches.
 -- The hard cut release wins: with "note off" its long release let old notes fade underneath and modulated the volume
 -- (syphus - better days, bass on AHX 1), so those instruments keep "note cut" without crossfade.
+-- The samples that start the phrases always get a volume AHDSR (without attack by default), so a fade-in of the note
+-- start can be set by hand.
 
 local Util = require('importer.util')
 
@@ -38,8 +40,13 @@ local function configure(ahdsr, attack_ms, release_ms)
   end
   local sustain = Util.parameter(ahdsr, 'Sustain')
   sustain.value = sustain.value_max
-  -- The release accepts a value string in ms, like the LFO delay (verified).
-  Util.parameter(ahdsr, 'Release').value_string = ('%d ms'):format(math.floor(release_ms + 0.5))
+  local release = Util.parameter(ahdsr, 'Release')
+  if release_ms > 0 then
+    -- The release accepts a value string in ms, like the LFO delay (verified).
+    release.value_string = ('%d ms'):format(math.floor(release_ms + 0.5))
+  else
+    release.value = release.value_min
+  end
 end
 
 ---@param target renoise.Instrument
@@ -105,34 +112,64 @@ function ReleaseWriter.write(target, instrument, frames_per_second, crossfade_ms
   return true
 end
 
----The note start must not fade in: the samples of the phrases' first lines get a copy of modulation set 1 without
----attack (the release stays, so they still crossfade into the next sample).
----@param target renoise.Instrument
----@param samples renoise.Sample[]
----@param report fun(name: string)
-function ReleaseWriter.write_start_set(target, samples, report)
-  if #samples == 0 then
-    return
+---@param modulation_set renoise.SampleModulationSet
+---@return renoise.SampleModulationDevice|nil
+local function find_ahdsr(modulation_set)
+  for _, device in ipairs(modulation_set.devices) do
+    if device.name:find('AHDSR', 1, true) then
+      return device
+    end
   end
+  return nil
+end
+
+---Gives the note start samples a volume AHDSR without attack. With `separate`, they get a set of their own, a copy of
+---set 1 (the release stays, so they still crossfade into the next sample); otherwise they share set 1. Runs before
+---the Renoise-filter path, whose sets start as copies of set 1.
+---@param target renoise.Instrument
+---@param separate boolean the phrases switch samples (`samples` are the copies for their first lines)
+---@param samples renoise.Sample[] note start samples (with `separate`)
+---@param report fun(name: string)
+function ReleaseWriter.write_start(target, separate, samples, report)
   local ok, message = pcall(function()
-    local index = #target.sample_modulation_sets + 1
-    target:insert_sample_modulation_set_at(index)
+    if #target.sample_modulation_sets == 0 then
+      target:insert_sample_modulation_set_at(1)
+    end
+    local index = 1
+    if separate then
+      index = #target.sample_modulation_sets + 1
+      target:insert_sample_modulation_set_at(index)
+      target.sample_modulation_sets[index]:copy_from(target.sample_modulation_sets[1])
+    end
     local modulation_set = target.sample_modulation_sets[index]
-    modulation_set:copy_from(target.sample_modulation_sets[1])
     modulation_set.name = 'Note start'
-    for _, device in ipairs(modulation_set.devices) do
-      if device.name:find('AHDSR', 1, true) then
-        local attack = Util.parameter(device, 'Attack')
-        attack.value = attack.value_min
+
+    local ahdsr = find_ahdsr(modulation_set)
+    if ahdsr then
+      local attack = Util.parameter(ahdsr, 'Attack')
+      attack.value = attack.value_min
+    else
+      local path = ahdsr_device_path(modulation_set)
+      if not path then
+        error('no AHDSR modulation device available')
+      end
+      ahdsr = modulation_set:insert_device_at(path, renoise.SampleModulationDevice.TARGET_VOLUME, 1)
+      local configured, configure_message = pcall(configure, ahdsr, 0, 0)
+      if not configured then
+        Util.log('%s: AHDSR parameters: %s', target.name, Util.describe_parameters(ahdsr))
+        modulation_set:delete_device_at(1)
+        error(configure_message, 0)
       end
     end
-    for _, sample in ipairs(samples) do
+
+    -- Without `separate`, every sample starts a phrase.
+    for _, sample in ipairs(separate and samples or target.samples) do
       sample.modulation_set_index = index
     end
   end)
   if not ok then
-    Util.log('%s: note start set not written: %s', target.name, tostring(message))
-    report('PWM crossfade note start (setup failed, see log; starts fade in)')
+    Util.log('%s: note start AHDSR not written: %s', target.name, tostring(message))
+    report('note start AHDSR (setup failed, see log)')
   end
 end
 

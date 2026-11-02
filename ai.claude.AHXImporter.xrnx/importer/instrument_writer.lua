@@ -22,6 +22,9 @@ local INSTRUMENT_VOLUME_DB = -6
 -- An instrument has at most 126 phrases.
 local MAX_PHRASES = 126
 
+-- Name prefix of the samples that start the phrases (they have a volume AHDSR of their own, see `ReleaseWriter`).
+local START_PREFIX = '[Start] '
+
 -- Fine pitch of the phrases (performance list portamento, period table tuning): 1/16 semitone, coarsened when the
 -- waveform state / fine tune pairs do not fit into the 255 addressable samples.
 local FINE_STEPS_PER_SEMITONE = 16
@@ -132,13 +135,13 @@ end
 ---@field state_index integer
 ---@field fine_index integer
 ---@field phrase AhxPhraseData first phrase that uses the sample
----@field first boolean copy for the phrase's first line (no fade-in)
+---@field first boolean copy for the phrase's first line (note start set)
 ---@field top_note integer highest note the sample is played at (band limit)
 
 ---Distinct sample keys (waveform state + fine tune) of all phrases, in order of first use. With `per_phrase`, every
 ---phrase gets samples of its own (the Renoise-filter path needs a cutoff envelope per note). With `separate_first`,
----the sample of a phrase's first line is a copy of its own (marked `first`), so the PWM crossfade can leave the note
----start without fade-in.
+---the sample of a phrase's first line is a copy of its own (marked `first`) with the note start set (see
+---`ReleaseWriter.write_start`).
 ---@param phrases AhxPhraseData[]
 ---@param variants { data: AhxPhraseData }[]
 ---@param per_phrase boolean
@@ -234,24 +237,26 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
   -- Phrases first: they decide which waveform state / fine tune pairs are needed as samples. When there are more
   -- pairs than the phrase instrument column can address, the fine tune gets coarser.
   local fine_steps = FINE_STEPS_PER_SEMITONE
-  local phrases, variants, sample_keys, crossfade_ms
+  local phrases, variants, sample_keys, crossfade_ms, switching
   local band_limited = options.rendering == 3
   local per_octave = band_limited
   while true do
     phrases, variants =
       build_phrases(simulations, state_set, simulation_by_offset, usage, frames_per_second, fine_steps)
+    -- Phrases that switch samples start with a copy of their first sample, which gets a modulation set of its own
+    -- (note start AHDSR, see `ReleaseWriter`); otherwise every sample starts a phrase.
+    switching = not filter_side and phrases_switch_samples(phrases, variants)
     -- The PWM crossfade only matters for phrases that switch samples; instruments with hard cut release keep their
     -- own release (see `ReleaseWriter`).
     crossfade_ms = 0
     if
       options.crossfade_ms > 0
-      and not filter_side
+      and switching
       and not (instrument.hard_cut_release ~= 0 and instrument.hard_cut_release_frames > 0)
-      and phrases_switch_samples(phrases, variants)
     then
       crossfade_ms = options.crossfade_ms
     end
-    sample_keys = collect_sample_keys(phrases, variants, filter_side ~= nil, crossfade_ms > 0, per_octave)
+    sample_keys = collect_sample_keys(phrases, variants, filter_side ~= nil, switching, per_octave)
     if #sample_keys <= WaveStates.MAX_STATES then
       break
     end
@@ -287,8 +292,8 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
     if key.fine_index ~= 0 then
       sample_name = ('%s %+d/%d'):format(sample_name, key.fine_index, fine_steps)
     end
-    if key.first then
-      sample_name = sample_name .. ' (start)'
+    if key.first or not switching then
+      sample_name = START_PREFIX .. sample_name
     end
     if band_limited and state.waveform ~= Waves.NOISE and state.wave_length <= 5 then
       local cycle = Waves.cycle(state.waveform, state.filter_pos, state.wave_length, state.square_pos)
@@ -334,17 +339,18 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
   if state_set.filter_step > 1 then
     report('filter resolution reduced (more than 255 waveform states)')
   end
-  if ReleaseWriter.write(target, instrument, frames_per_second, crossfade_ms, report) then
-    local first_samples = {}
-    for index, key in ipairs(sample_keys) do
-      if key.first then
-        first_samples[#first_samples + 1] = target.samples[index]
-      end
-    end
-    ReleaseWriter.write_start_set(target, first_samples, report)
-  elseif options.crossfade_ms > 0 and instrument.hard_cut_release ~= 0 and instrument.hard_cut_release_frames > 0 then
+  ReleaseWriter.write(target, instrument, frames_per_second, crossfade_ms, report)
+  if options.crossfade_ms > 0 and instrument.hard_cut_release ~= 0 and instrument.hard_cut_release_frames > 0 then
     report('PWM crossfade (skipped for instruments with hard cut release)')
   end
+  -- Before the Renoise-filter path: its sets start as copies of set 1, so they carry the note start AHDSR.
+  local start_samples = {}
+  for index, key in ipairs(sample_keys) do
+    if key.first then
+      start_samples[#start_samples + 1] = target.samples[index]
+    end
+  end
+  ReleaseWriter.write_start(target, switching, start_samples, report)
   if filter_side then
     for index, key in ipairs(sample_keys) do
       local phrase = key.phrase

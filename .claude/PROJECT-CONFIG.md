@@ -102,7 +102,7 @@ become patterns and the pattern sequence.
   - `filter_writer.lua` – modulation set with filter + cutoff envelope per sample (failures reported, sample stays
     unfiltered).
   - `release_writer.lua` – volume AHDSR (full level until note-off, then release) for the hard cut release or the
-    PWM crossfade; failures are reported, not fatal, and the device is removed again. Modulation device parameters are
+    PWM crossfade, and the note start set with its AHDSR; failures are reported, not fatal, and the device is removed again. Modulation device parameters are
     set via `device.parameters` by name: the typed fields (`amount`, …) do not exist at runtime in Renoise 3.5.4
     (LFO names: Frequency, Amplitude, Dephase, Delay; values accept strings in Hz / ms).
   - `util.lua` – tool name, console logging, dialog close watcher, device parameter lookup by name.
@@ -181,9 +181,9 @@ become patterns and the pattern sequence.
 - Not converted yet (reported in the scripting console): 9xx without trigger.
 - Instruments get a default volume of -6 dB (four full-scale voices clip otherwise). The master gets a Renoise
   Maximizer with threshold -0.5 dB.
-- Every import starts with the options dialog: sample interpolation (none / linear / cubic / sinc, default none),
-  the sample option "Oversample" (checkbox, default on) and
-  sample resolution (8 / 16 / 32 bit, default 8) and sample rate (8363 / 16726 / 33452 Hz = 1× / 2× / 4×, default
+- Every import starts with the options dialog: sample interpolation (none / linear / cubic / sinc, default sinc),
+  the sample option "Oversample" (checkbox, default off) and
+  sample resolution (8 / 16 / 32 bit, default 32) and sample rate (8363 / 16726 / 33452 Hz = 1× / 2× / 4×, default
   4×; higher rates repeat every frame, so waveform, pitch and 0Sxx offsets stay the same).
   Rendering Original / Smoothed / Band-limited (default Smoothed, by ear): Original repeats every frame (sample and
   hold, like Paula); Smoothed interpolates between the frames (Catmull-Rom, wrapping around the loop); Band-limited
@@ -195,8 +195,12 @@ become patterns and the pattern sequence.
   PWM crossfade slider 0..80 ms (0 = off, default 10 ms by ear): a volume AHDSR with attack = release = the crossfade time and new
   note action "note off", so every sample switch of a phrase crossfades (against the ring-modulation-like roughness of
   PWM). Only for instruments whose phrases switch samples, not for instruments with hard cut release (they keep
-  "note cut"; reported). The note start must not fade in: the sample of each phrase's first line is a copy
-  ("(start)") with modulation set "Note start" (copy of set 1 without attack).
+  "note cut"; reported). The note start must not fade in by itself, see the note start samples.
+- Note start samples: the samples that start the phrases are named "[Start] …" and use modulation set "Note start"
+  with a volume AHDSR without attack (to set a fade-in by hand; release as in set 1, otherwise neutral). When the
+  phrases switch samples, they are copies of the phrases' first samples with a set of their own (copy of set 1);
+  otherwise every sample starts a phrase and set 1 is the note start set (the Renoise-filter path copies it per
+  sample).
   Pattern resolution Auto / 1× / 2× / 4× pattern lines per AHX row (default Auto = the smallest resolution at which
   no vibrato needs 0Vxy speed above F, `ahx/resolution.lua`): LPB × factor, TPL / factor (a tick stays
   a frame when the speed is divisible, otherwise approximated and reported), note delay / note cut / hard cut go to
