@@ -68,13 +68,47 @@ local function build_phrases(simulations, state_set, simulation_by_offset, usage
   return phrases, variants
 end
 
+---True when a phrase switches between samples during the note.
+---@param phrases AhxPhraseData[]
+---@param variants { data: AhxPhraseData }[]
+---@return boolean
+local function phrases_switch_samples(phrases, variants)
+  local function switches(data)
+    local first = nil
+    for index = 1, data.number_of_lines do
+      local line = data.lines[index]
+      if line and line.sample_key then
+        first = first or line.sample_key
+        if line.sample_key ~= first then
+          return true
+        end
+      end
+    end
+    return false
+  end
+  for _, data in ipairs(phrases) do
+    if switches(data) then
+      return true
+    end
+  end
+  for _, variant in ipairs(variants) do
+    if switches(variant.data) then
+      return true
+    end
+  end
+  return false
+end
+
 ---Distinct sample keys (waveform state + fine tune) of all phrases, in order of first use. With `per_phrase`, every
----phrase gets samples of its own (the Renoise-filter path needs a cutoff envelope per note).
+---phrase gets samples of its own (the Renoise-filter path needs a cutoff envelope per note). With `separate_first`,
+---the sample of a phrase's first line is a copy of its own (marked `first`), so the PWM crossfade can leave the note
+---start without fade-in.
 ---@param phrases AhxPhraseData[]
 ---@param variants { data: AhxPhraseData }[]
 ---@param per_phrase boolean
----@return { key: string, state_index: integer, fine_index: integer, phrase: AhxPhraseData }[]
-local function collect_sample_keys(phrases, variants, per_phrase)
+---@param separate_first boolean
+---@return { key: string, state_index: integer, fine_index: integer, phrase: AhxPhraseData, first: boolean }[]
+local function collect_sample_keys(phrases, variants, per_phrase, separate_first)
   local keys, seen = {}, {}
   local phrase_number = 0
   local function collect(data)
@@ -85,6 +119,10 @@ local function collect_sample_keys(phrases, variants, per_phrase)
         if per_phrase then
           line.sample_key = line.state_index .. ':' .. line.fine_index .. '#' .. phrase_number
         end
+        local first = separate_first and index == 1
+        if first then
+          line.sample_key = line.sample_key .. '|first'
+        end
         if not seen[line.sample_key] then
           seen[line.sample_key] = true
           keys[#keys + 1] = {
@@ -92,6 +130,7 @@ local function collect_sample_keys(phrases, variants, per_phrase)
             state_index = line.state_index,
             fine_index = line.fine_index,
             phrase = data,
+            first = first,
           }
         end
       end
@@ -138,11 +177,22 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
   -- Phrases first: they decide which waveform state / fine tune pairs are needed as samples. When there are more
   -- pairs than the phrase instrument column can address, the fine tune gets coarser.
   local fine_steps = FINE_STEPS_PER_SEMITONE
-  local phrases, variants, sample_keys
+  local phrases, variants, sample_keys, crossfade_ms
   while true do
     phrases, variants =
       build_phrases(simulations, state_set, simulation_by_offset, usage, frames_per_second, fine_steps)
-    sample_keys = collect_sample_keys(phrases, variants, filter_side ~= nil)
+    -- The PWM crossfade only matters for phrases that switch samples; instruments with hard cut release keep their
+    -- own release (see `ReleaseWriter`).
+    crossfade_ms = 0
+    if
+      options.crossfade_ms > 0
+      and not filter_side
+      and not (instrument.hard_cut_release ~= 0 and instrument.hard_cut_release_frames > 0)
+      and phrases_switch_samples(phrases, variants)
+    then
+      crossfade_ms = options.crossfade_ms
+    end
+    sample_keys = collect_sample_keys(phrases, variants, filter_side ~= nil, crossfade_ms > 0)
     if #sample_keys <= WaveStates.MAX_STATES or fine_steps == 1 then
       break
     end
@@ -169,6 +219,9 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
     local sample_name = WaveStates.describe(state)
     if key.fine_index ~= 0 then
       sample_name = ('%s %+d/%d'):format(sample_name, key.fine_index, fine_steps)
+    end
+    if key.first then
+      sample_name = sample_name .. ' (start)'
     end
     SampleWriter.write(sample, frames, sample_name, options)
     -- sample.fine_tune has 128 steps per semitone (verified).
@@ -208,7 +261,17 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
   if state_set.filter_step > 1 then
     report('filter resolution reduced (more than 255 waveform states)')
   end
-  ReleaseWriter.write(target, instrument, frames_per_second, report)
+  if ReleaseWriter.write(target, instrument, frames_per_second, crossfade_ms, report) then
+    local first_samples = {}
+    for index, key in ipairs(sample_keys) do
+      if key.first then
+        first_samples[#first_samples + 1] = target.samples[index]
+      end
+    end
+    ReleaseWriter.write_start_set(target, first_samples, report)
+  elseif options.crossfade_ms > 0 and instrument.hard_cut_release ~= 0 and instrument.hard_cut_release_frames > 0 then
+    report('PWM crossfade (skipped for instruments with hard cut release)')
+  end
   if filter_side then
     for index, key in ipairs(sample_keys) do
       local phrase = key.phrase

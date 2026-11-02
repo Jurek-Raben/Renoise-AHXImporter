@@ -24,6 +24,9 @@ local MAX_LINES = 512
 local SAMPLE_RATE = 8363
 local BASE_NOTE = 48
 
+-- Pitch change from one frame to the next that counts as a jump (arpeggio) instead of a slide step.
+local JUMP_SEMITONES = 0.5
+
 local MIN_PERIOD = 0x0071
 local MAX_PERIOD = 0x0d60
 
@@ -126,8 +129,14 @@ function PhraseBuilder.build(simulation, state_set, simulation_index, trigger_no
   local track_ahx_note = trigger_note - NoteUsage.NOTE_OFFSET
   local simulated_count = #simulation.frames
 
-  -- Renoise note, fine tune, waveform state, sample key, quantized pitch and volume of every frame.
+  -- Renoise note, fine tune, waveform state, sample key, played pitch and volume of every frame.
   local notes, fines, states, samples, pitches, volumes = {}, {}, {}, {}, {}, {}
+  -- Pitch jumps (arpeggios) keep the playing sample: a jump of at least JUMP_SEMITONES with an unchanged waveform state
+  -- only changes the note (0GFF) and keeps the fine tune of the playing sample (off by a few cents of the period
+  -- table tuning), until the waveform state changes or the pitch moves in small steps (slide). Otherwise every
+  -- arpeggio step would be a sample switch, which the PWM crossfade smeared and dipped (xeron - 64k is all you need,
+  -- AHX 1 / instrument 02).
+  local previous_pitch, sticky_fine = nil, nil
   for index, frame in ipairs(frames) do
     local ahx_note
     if frame.fixed then
@@ -138,10 +147,6 @@ function PhraseBuilder.build(simulation, state_set, simulation_index, trigger_no
     end
     local pitch = clamp(exact_pitch(ahx_note, frame.perf_slide_period), 0, 119)
     pitch = math.floor(pitch * fine_steps + 0.5) / fine_steps
-    local note = math.floor(pitch + 0.5)
-    notes[index] = note
-    fines[index] = math.floor((pitch - note) * fine_steps + 0.5)
-    pitches[index] = pitch
     -- Unrolled frames repeat the simulated loop, so their state index is the one of the simulated frame.
     local simulated_index = index
     if index > simulated_count then
@@ -149,6 +154,28 @@ function PhraseBuilder.build(simulation, state_set, simulation_index, trigger_no
       simulated_index = simulation.loop_start + (index - simulation.loop_start) % loop_length
     end
     states[index] = state_set.frame_states[simulation_index][simulated_index]
+
+    if index > 1 then
+      local jump = math.abs(pitch - previous_pitch)
+      if states[index] ~= states[index - 1] or (jump > 0 and jump < JUMP_SEMITONES) then
+        sticky_fine = nil
+      elseif jump >= JUMP_SEMITONES then
+        sticky_fine = fines[index - 1]
+      end
+    end
+    previous_pitch = pitch
+
+    local note, fine
+    if sticky_fine then
+      fine = sticky_fine
+      note = math.floor(pitch - fine / fine_steps + 0.5)
+    else
+      note = math.floor(pitch + 0.5)
+      fine = math.floor((pitch - note) * fine_steps + 0.5)
+    end
+    notes[index] = note
+    fines[index] = fine
+    pitches[index] = note + fine / fine_steps
     samples[index] = states[index] .. ':' .. fines[index]
     volumes[index] = frame.volume * 2
   end

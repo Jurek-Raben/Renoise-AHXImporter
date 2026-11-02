@@ -9,6 +9,12 @@ local OptionsDialog = {}
 local CONTENT_WIDTH = 320
 local POPUP_WIDTH = 160
 
+---@param ms integer
+---@return string
+local function crossfade_label(ms)
+  return ms == 0 and 'off' or ('%d ms'):format(ms)
+end
+
 -- Base sample rate of the samples, see `SampleWriter`.
 local BASE_SAMPLE_RATE = 8363
 
@@ -74,6 +80,7 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
       sample_rate_factor = options.sample_rate_factor,
       filter_resonance = options.filter_resonance,
       lines_per_row = options.lines_per_row,
+      crossfade_ms = options.crossfade_ms,
     })
   end
 
@@ -129,6 +136,30 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
         text = 'None keeps the hard, aliased sound of the Amiga.',
         style = 'disabled',
       },
+      Widgets.labeled(
+        vb,
+        'PWM crossfade',
+        vb:row {
+          spacing = 6,
+          vb:slider {
+            width = POPUP_WIDTH - 40,
+            min = 0,
+            max = Preferences.MAX_CROSSFADE_MS,
+            default = Preferences.DEFAULT_CROSSFADE_MS,
+            value = options.crossfade_ms,
+            notifier = function(value)
+              options.crossfade_ms = math.floor(value + 0.5)
+              vb.views.crossfade_text.text = crossfade_label(options.crossfade_ms)
+              update_saved_mark()
+            end,
+          },
+          vb:text {
+            id = 'crossfade_text',
+            text = crossfade_label(options.crossfade_ms),
+            width = 40,
+          },
+        }
+      ),
     }, CONTENT_WIDTH),
     Widgets.section(vb, 'Patterns', {
       Widgets.labeled(

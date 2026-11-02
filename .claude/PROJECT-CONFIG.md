@@ -90,7 +90,8 @@ become patterns and the pattern sequence.
 - `importer/` – everything that touches the Renoise API:
   - `controller.lua` – workflow: parse → `ui/options_dialog.lua` → `song_creator.lua` (new song without template) →
     `process_slicer.lua` (sliced build with progress dialog, ported from SongMerger) → summary.
-  - `preferences.lua` – import options (interpolation, bit depth, sample rate, filter resonance, pattern resolution) in the tool's `preferences.xml`.
+  - `preferences.lua` – import options (interpolation, bit depth, sample rate, filter resonance, pattern resolution,
+    PWM crossfade) in the tool's `preferences.xml`.
   - `ui/widgets.lua` – shared dialog look (ported from SongMerger), `ui/options_dialog.lua` – import options.
   - `song_setup.lua` – four sequencer tracks (LRRL panning), no send/group tracks, Maximizer on the master, one
     instrument, one sequence slot.
@@ -98,8 +99,8 @@ become patterns and the pattern sequence.
     `pattern_writer.lua`.
   - `filter_writer.lua` – modulation set with filter + cutoff envelope per sample (failures reported, sample stays
     unfiltered).
-  - `release_writer.lua` – volume AHDSR (full level until note-off, then release) for instruments with hard cut
-    release; failures are reported, not fatal, and the device is removed again. Modulation device parameters are
+  - `release_writer.lua` – volume AHDSR (full level until note-off, then release) for the hard cut release or the
+    PWM crossfade; failures are reported, not fatal, and the device is removed again. Modulation device parameters are
     set via `device.parameters` by name: the typed fields (`amount`, …) do not exist at runtime in Renoise 3.5.4
     (LFO names: Frequency, Amplitude, Dephase, Delay; values accept strings in Hz / ms).
   - `util.lua` – tool name, console logging, dialog close watcher, device parameter lookup by name.
@@ -141,6 +142,10 @@ become patterns and the pattern sequence.
   rest is a sample fine tune: each sample is a waveform state × fine tune pair (1/16 semitone, `sample.fine_tune` with
   128 steps per semitone), coarsened (8, 4, 2, 1) when the pairs exceed 255 samples. A fine tune change is a sample
   switch (retrigger with phase-continuous 0Sxx).
+  Pitch jumps of at least half a semitone with an unchanged waveform state (arpeggios) keep the playing sample: only
+  the note changes (0GFF) and the fine tune of that sample stays (a few cents off), until the waveform state changes
+  or the pitch moves in small steps again. Otherwise every arpeggio step was a sample switch, which the PWM crossfade
+  smeared (xeron - 64k is all you need, AHX 1 / instrument 02).
 - Phase continuity: AHX keeps the playback position when the waveform changes, Renoise restarts a triggered sample.
   The phrase builder follows the playback position (from each frame's pitch) and starts switched samples with 0Sxx
   at that position. Cycle samples are therefore 256 frames (a whole number of cycles for every wave length, 0Sxx
@@ -174,6 +179,11 @@ become patterns and the pattern sequence.
   sample resolution (8 / 16 / 32 bit, default 8) and sample rate (8363 / 16726 / 33452 Hz = 1× / 2× / 4×, default
   1×; higher rates repeat every frame, so waveform, pitch and 0Sxx offsets stay the same).
   Filter resonance slider 0..0.3 (default 0.2) for the Renoise-filter path.
+  PWM crossfade slider 0..20 ms (0 = off, default 10 ms by ear): a volume AHDSR with attack = release = the crossfade time and new
+  note action "note off", so every sample switch of a phrase crossfades (against the ring-modulation-like roughness of
+  PWM). Only for instruments whose phrases switch samples, not for instruments with hard cut release (they keep
+  "note cut"; reported). The note start must not fade in: the sample of each phrase's first line is a copy
+  ("(start)") with modulation set "Note start" (copy of set 1 without attack).
   Pattern resolution Auto / 1× / 2× / 4× pattern lines per AHX row (default Auto = the smallest resolution at which
   no vibrato needs 0Vxy speed above F, `ahx/resolution.lua`): LPB × factor, TPL / factor (a tick stays
   a frame when the speed is divisible, otherwise approximated and reported), note delay / note cut / hard cut go to
