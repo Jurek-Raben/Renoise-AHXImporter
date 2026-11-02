@@ -1,5 +1,8 @@
--- Import options. Renoise loads/saves them automatically (preferences.xml in the tool folder). The options dialog
--- edits a copy and writes it back only with its Save button.
+-- Import options in preferences.xml in the tool folder. The document is not assigned to `renoise.tool().preferences`:
+-- Renoise would then write it back on its own (e.g. when the tool unloads). The file is read once here and written
+-- only by `Preferences.save` (the options dialog's Save button).
+
+local Util = require('importer.util')
 
 local Preferences = {}
 
@@ -14,15 +17,15 @@ Preferences.LINES_PER_ROW = { 0, 1, 2, 4 }
 Preferences.MAX_FILTER_RESONANCE = 0.3
 Preferences.DEFAULT_FILTER_RESONANCE = 0.136
 Preferences.DEFAULT_ROLL_OFF = 0.5
-Preferences.MAX_CROSSFADE_MS = 20
+Preferences.MAX_CROSSFADE_MS = 80
 Preferences.DEFAULT_CROSSFADE_MS = 10
 
 local document = renoise.Document.create('AHXImporterPreferences') {
   -- Index into INTERPOLATIONS, equal to renoise.Sample.INTERPOLATE_* (1 = none).
-  interpolation = 1,
+  interpolation = 4,
   -- Renoise's sample option "Oversample" (band-limited playback of the interpolation).
-  oversample = true,
-  bit_depth = 8,
+  oversample = false,
+  bit_depth = 32,
   sample_rate_factor = 4,
   rendering = 2,
   filter_resonance = Preferences.DEFAULT_FILTER_RESONANCE,
@@ -31,7 +34,21 @@ local document = renoise.Document.create('AHXImporterPreferences') {
   band_limit_roll_off = Preferences.DEFAULT_ROLL_OFF,
 }
 
-renoise.tool().preferences = document
+-- ASSUMPTION: bundle_path ends with a path separator (handled either way).
+local bundle_path = renoise.tool().bundle_path
+if not bundle_path:match('[/\\]$') then
+  bundle_path = bundle_path .. '/'
+end
+local FILE_NAME = bundle_path .. 'preferences.xml'
+
+local existing = io.open(FILE_NAME, 'r')
+if existing then
+  existing:close()
+  local ok, error_message = document:load_from(FILE_NAME)
+  if not ok then
+    Util.log('could not load %s: %s', FILE_NAME, tostring(error_message))
+  end
+end
 
 ---@class AhxImportOptions
 ---@field interpolation integer renoise.Sample.INTERPOLATE_* (1..4)
@@ -41,7 +58,7 @@ renoise.tool().preferences = document
 ---@field rendering integer 1 = original, 2 = smoothed, 3 = band-limited (see Preferences.RENDERINGS)
 ---@field lines_per_row integer 0 (auto), 1, 2 or 4 pattern lines per AHX row (pattern resolution)
 ---@field band_limit_roll_off number 0..1 share of the harmonics that fades out in band-limited rendering
----@field crossfade_ms integer 0..20 ms crossfade of phrase sample switches (0 = off)
+---@field crossfade_ms integer 0..80 ms crossfade of phrase sample switches (0 = off)
 ---@field filter_resonance number 0..0.3, resonance of the Renoise filter path (share of the parameter range)
 
 ---The saved options.
@@ -60,7 +77,7 @@ function Preferences.load()
   }
 end
 
----Saves options.
+---Saves options to preferences.xml.
 ---@param options AhxImportOptions
 function Preferences.save(options)
   document.interpolation.value = options.interpolation
@@ -72,6 +89,10 @@ function Preferences.save(options)
   document.lines_per_row.value = options.lines_per_row
   document.crossfade_ms.value = options.crossfade_ms
   document.band_limit_roll_off.value = options.band_limit_roll_off
+  local ok, error_message = document:save_as(FILE_NAME)
+  if not ok then
+    Util.log('could not save %s: %s', FILE_NAME, tostring(error_message))
+  end
 end
 
 ---@param options AhxImportOptions
@@ -86,7 +107,7 @@ function Preferences.is_saved(options)
       and math.abs(saved.filter_resonance - options.filter_resonance) < 0.0005
       and saved.lines_per_row == options.lines_per_row
       and saved.crossfade_ms == options.crossfade_ms
-    and math.abs(saved.band_limit_roll_off - options.band_limit_roll_off) < 0.005
+      and math.abs(saved.band_limit_roll_off - options.band_limit_roll_off) < 0.005
 end
 
 return Preferences

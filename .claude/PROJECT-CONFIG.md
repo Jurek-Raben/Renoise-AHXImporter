@@ -192,7 +192,7 @@ become patterns and the pattern sequence.
   a hard cut rang like a steep resonant filter), DC kept, one sample per octave of the played notes (one per sample when
   that exceeds 255 samples; noise stays smoothed). Smoothed and band-limited render at least at 4×. Rejected for now: an Amiga output filter emulation (A500 RC / LED filter).
   Filter resonance slider 0..0.3 (default 0.136) for the Renoise-filter path.
-  PWM crossfade slider 0..20 ms (0 = off, default 10 ms by ear): a volume AHDSR with attack = release = the crossfade time and new
+  PWM crossfade slider 0..80 ms (0 = off, default 10 ms by ear): a volume AHDSR with attack = release = the crossfade time and new
   note action "note off", so every sample switch of a phrase crossfades (against the ring-modulation-like roughness of
   PWM). Only for instruments whose phrases switch samples, not for instruments with hard cut release (they keep
   "note cut"; reported). The note start must not fade in: the sample of each phrase's first line is a copy
