@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <AHXImporterPreferences doc_version="0">
   <sample_rate_factor>4</sample_rate_factor>
+  <filter_resonance>0.29999999999999999</filter_resonance>
   <interpolation>4</interpolation>
   <bit_depth>32</bit_depth>
 </AHXImporterPreferences>

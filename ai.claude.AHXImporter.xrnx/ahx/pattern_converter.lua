@@ -75,12 +75,15 @@ local GLIDE_UNITS_PER_SEMITONE = 64
 
 -- Instrument vibrato as pattern vibrato 0Vxy on every row once the vibrato delay has run out (an LFO in the
 -- instrument restarts with every sample switch of the phrase).
--- Speed: AHX advances a 64-step sine by `speed` per frame (= tick). 1:1 sounded about twice as fast as the original
--- (xeron - 64k is all you need, AHX 07), so x = speed / 2.
+-- Speed: AHX advances a 64-step sine by `speed` per frame, i.e. the vibrato rate is fixed in Hz. Renoise's 0Vxy
+-- rate seems to follow the lines instead of the ticks: x = speed / 2 was right at song speed 3 (xeron - 64k is all
+-- you need, AHX 07), but too slow at speed 4 (pink - thanatos remix). So x scales with the song speed:
+-- x = speed · song speed / 6.
+-- ASSUMPTION: the 0Vxy rate is proportional to x per line.
 -- Depth: AHX adds `sine · depth >> 7` to the period, so the depth in semitones depends on the note (high notes have
 -- small periods). It is converted per row at the current note; Renoise depth is semitone-based.
 -- y = depth in 1/8 semitones (verified by ear: xeron - 64k is all you need, syphus - better days).
-local VIBRATO_SPEED_FACTOR = 0.5
+local VIBRATO_SPEED_DIVISOR = 6
 local VIBRATO_DEPTH_UNITS_PER_SEMITONE = 8
 
 ---Renoise slide amount (per tick = per AHX frame) for an AHX period slide at a note.
@@ -308,7 +311,7 @@ function PatternConverter:add_vibrato(cell, state)
   local vibrato = state.vibrato
   -- The replayer starts the vibrato in the first frame after `delay` frames.
   if vibrato and vibrato.depth > 0 and vibrato.speed > 0 and state.frames + self.tempo > vibrato.delay then
-    local speed = math.floor(bit.band(vibrato.speed, 0x3f) * VIBRATO_SPEED_FACTOR + 0.5)
+    local speed = math.floor(bit.band(vibrato.speed, 0x3f) * self.tempo / VIBRATO_SPEED_DIVISOR + 0.5)
     local depth = math.floor(vibrato_semitones(vibrato.depth, state.note) * VIBRATO_DEPTH_UNITS_PER_SEMITONE + 0.5)
     if speed > 15 or depth > 15 then
       self:report_unsupported('vibrato speed/depth above F (clamped)')

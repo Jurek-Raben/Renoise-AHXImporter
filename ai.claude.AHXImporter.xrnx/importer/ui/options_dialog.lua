@@ -64,6 +64,7 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
       interpolation = options.interpolation,
       bit_depth = options.bit_depth,
       sample_rate_factor = options.sample_rate_factor,
+      filter_resonance = options.filter_resonance,
     })
   end
 
@@ -117,6 +118,32 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
       ),
       vb:text {
         text = 'None keeps the hard, aliased sound of the Amiga.',
+        style = 'disabled',
+      },
+    }, CONTENT_WIDTH),
+    Widgets.section(vb, 'Filter', {
+      Widgets.labeled(
+        vb,
+        'Resonance',
+        vb:row {
+          spacing = 6,
+          vb:slider {
+            width = POPUP_WIDTH - 40,
+            min = 0,
+            max = Preferences.MAX_FILTER_RESONANCE,
+            default = Preferences.DEFAULT_FILTER_RESONANCE,
+            value = options.filter_resonance,
+            notifier = function(value)
+              options.filter_resonance = value
+              vb.views.resonance_text.text = ('%.3f'):format(value)
+              update_saved_mark()
+            end,
+          },
+          vb:text { id = 'resonance_text', text = ('%.3f'):format(options.filter_resonance), width = 40 },
+        }
+      ),
+      vb:text {
+        text = 'For filter sweeps played by the Renoise filter.',
         style = 'disabled',
       },
     }, CONTENT_WIDTH),

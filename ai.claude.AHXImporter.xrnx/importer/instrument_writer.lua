@@ -2,15 +2,18 @@
 -- phrase per triggered note that plays it frame by frame (sample switches, pitch, envelope volume). Triggers with a
 -- square offset (9xx) get extra variant phrases.
 
+local FilterPath = require('ahx.filter_path')
 local NoteUsage = require('ahx.note_usage')
 local PhraseBuilder = require('ahx.phrase_builder')
 local Simulator = require('ahx.simulator')
 local WaveStates = require('ahx.wave_states')
 local Waves = require('ahx.waves')
+local FilterWriter = require('importer.filter_writer')
 local PhraseWriter = require('importer.phrase_writer')
 local ProcessSlicer = require('importer.process_slicer')
 local ReleaseWriter = require('importer.release_writer')
 local SampleWriter = require('importer.sample_writer')
+local Util = require('importer.util')
 
 local InstrumentWriter = {}
 
@@ -38,6 +41,7 @@ local function build_phrases(simulations, state_set, simulation_by_offset, usage
   local phrases = {}
   for index, note in ipairs(usage.notes) do
     phrases[index] = PhraseBuilder.build(simulations[1], state_set, 1, note, frames_per_second, fine_steps)
+    phrases[index].simulation_index = 1
     ProcessSlicer.step()
   end
 
@@ -58,23 +62,38 @@ local function build_phrases(simulations, state_set, simulation_by_offset, usage
       ),
       square_offset = variant.square_offset,
     }
+    variants[#variants].data.simulation_index = simulation_index
     ProcessSlicer.step()
   end
   return phrases, variants
 end
 
----Distinct sample keys (waveform state + fine tune) of all phrases, in order of first use.
+---Distinct sample keys (waveform state + fine tune) of all phrases, in order of first use. With `per_phrase`, every
+---phrase gets samples of its own (the Renoise-filter path needs a cutoff envelope per note).
 ---@param phrases AhxPhraseData[]
 ---@param variants { data: AhxPhraseData }[]
----@return { key: string, state_index: integer, fine_index: integer }[]
-local function collect_sample_keys(phrases, variants)
+---@param per_phrase boolean
+---@return { key: string, state_index: integer, fine_index: integer, phrase: AhxPhraseData }[]
+local function collect_sample_keys(phrases, variants, per_phrase)
   local keys, seen = {}, {}
+  local phrase_number = 0
   local function collect(data)
+    phrase_number = phrase_number + 1
     for index = 1, data.number_of_lines do
       local line = data.lines[index]
-      if line and line.sample_key and not seen[line.sample_key] then
-        seen[line.sample_key] = true
-        keys[#keys + 1] = { key = line.sample_key, state_index = line.state_index, fine_index = line.fine_index }
+      if line and line.sample_key then
+        if per_phrase then
+          line.sample_key = line.state_index .. ':' .. line.fine_index .. '#' .. phrase_number
+        end
+        if not seen[line.sample_key] then
+          seen[line.sample_key] = true
+          keys[#keys + 1] = {
+            key = line.sample_key,
+            state_index = line.state_index,
+            fine_index = line.fine_index,
+            phrase = data,
+          }
+        end
       end
     end
   end
@@ -107,8 +126,14 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
     simulations[#simulations + 1] = Simulator.run(song, instrument, { square_offset = offset })
     simulation_by_offset[offset] = #simulations
   end
-  local state_set = WaveStates.collect(simulations, instrument.wave_length)
+  -- Renoise-filter path: a one-sided filter sweep without other sample changes is done by the Renoise filter, so the
+  -- states are collected unfiltered (see `FilterPath`).
+  local filter_side = FilterPath.analyze(simulations, instrument.wave_length)
+  local state_set = WaveStates.collect(simulations, instrument.wave_length, filter_side ~= nil)
   local frames_per_second = 50 * plan.speed_multiplier
+  if filter_side then
+    Util.log('%s: %s-pass filter sweep via Renoise filter', name, filter_side)
+  end
 
   -- Phrases first: they decide which waveform state / fine tune pairs are needed as samples. When there are more
   -- pairs than the phrase instrument column can address, the fine tune gets coarser.
@@ -117,7 +142,7 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
   while true do
     phrases, variants =
       build_phrases(simulations, state_set, simulation_by_offset, usage, frames_per_second, fine_steps)
-    sample_keys = collect_sample_keys(phrases, variants)
+    sample_keys = collect_sample_keys(phrases, variants, filter_side ~= nil)
     if #sample_keys <= WaveStates.MAX_STATES or fine_steps == 1 then
       break
     end
@@ -184,6 +209,23 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
     report('filter resolution reduced (more than 255 waveform states)')
   end
   ReleaseWriter.write(target, instrument, frames_per_second, report)
+  if filter_side then
+    for index, key in ipairs(sample_keys) do
+      local phrase = key.phrase
+      local envelope = FilterPath.envelope(simulations[phrase.simulation_index], filter_side, phrase.note)
+      FilterWriter.write(
+        target,
+        target.samples[index],
+        filter_side,
+        envelope,
+        frames_per_second,
+        options.filter_resonance,
+        report,
+        index == 1
+      )
+      ProcessSlicer.step(('Instrument %02d: filter %d of %d'):format(number, index, #sample_keys))
+    end
+  end
   return variant_index
 end
 

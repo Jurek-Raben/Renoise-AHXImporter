@@ -83,17 +83,20 @@ become patterns and the pattern sequence.
     column addresses 00..FE; the filter resolution is coarsened when needed).
   - `phrase_builder.lua` – neutral phrase data from a simulation for one triggered note: one line per frame, only
     changes written, phase-continuous sample offsets.
+  - `filter_path.lua` – Renoise-filter path decision and AHX cutoff per frame.
   - `note_usage.lua` – the notes each instrument is triggered with (one phrase per note) and its 9xx note/offset
     variants.
 - `importer/` – everything that touches the Renoise API:
   - `controller.lua` – workflow: parse → `ui/options_dialog.lua` → `song_creator.lua` (new song without template) →
     `process_slicer.lua` (sliced build with progress dialog, ported from SongMerger) → summary.
-  - `preferences.lua` – import options (interpolation, bit depth, sample rate) in the tool's `preferences.xml`.
+  - `preferences.lua` – import options (interpolation, bit depth, sample rate, filter resonance) in the tool's `preferences.xml`.
   - `ui/widgets.lua` – shared dialog look (ported from SongMerger), `ui/options_dialog.lua` – import options.
   - `song_setup.lua` – four sequencer tracks (LRRL panning), no send/group tracks, Maximizer on the master, one
     instrument, one sequence slot.
   - `instrument_writer.lua` (simulation → samples + phrase), `sample_writer.lua`, `phrase_writer.lua`,
     `pattern_writer.lua`.
+  - `filter_writer.lua` – modulation set with filter + cutoff envelope per sample (failures reported, sample stays
+    unfiltered).
   - `release_writer.lua` – volume AHDSR (full level until note-off, then release) for instruments with hard cut
     release; failures are reported, not fatal, and the device is removed again. Modulation device parameters are
     set via `device.parameters` by name: the typed fields (`amount`, …) do not exist at runtime in Renoise 3.5.4
@@ -105,13 +108,18 @@ become patterns and the pattern sequence.
 
 - **Filters: automatic hybrid per instrument.**
   - PWM (square positions) is always baked: one sample per used pulse width.
-  - Filter modulation uses the Renoise instrument filter (modulation set: filter + triangle LFO + 100 % key tracking)
-    when the instrument's filter range stays on one side (only low-pass positions 1..31 or only high-pass 33..63) and
-    the filter position is not set hard by performance list command 0xx.
-  - Otherwise (range crosses the unfiltered position 32, hard 0xx positions, or only a few fixed positions) the used
-    filter positions are baked into samples.
+  - Renoise-filter path (`ahx/filter_path.lua`, `importer/filter_writer.lua`): when all simulated filter positions
+    stay on one side (low-pass 1..32 or high-pass 32..63, 32 = open) and nothing else changes the sample during a
+    note (waveform, pulse width, performance portamento), the samples are unfiltered and every phrase gets a sample of
+    its own with its own modulation set: low-/high-pass filter (`LP Clean` etc.), resonance from the import options (0..0.3, default 0.2), cutoff input at maximum and a
+    cutoff envelope (operator multiply, points mode, one point per frame, loop = simulation loop). The cutoff per
+    frame is the AHX filter's: fc = fs · asin(f / 2) / π with f = (8 + 3 · step) · 1.25 / 100 and fs = Paula rate of
+    the frame's pitch. Hz are mapped to the normalized cutoff by probing the cutoff parameter's value strings.
+    Reason: baked sweeps retrigger the sample on every filter step, which sounds rough (syphus - returns, AHX 01).
+  - Otherwise (sweep crossing position 32, or sample changes anyway) the used filter positions are baked.
 - Samples hold the waveform cycle repeated to 256 frames (the replayer uses 0x280) as a forward loop; interpolation
-  and bit depth come from the import options. White noise uses the whole filtered noise table (0x280 · 3 frames).
+  and bit depth come from the import options. (Tried and reverted: upsampling short cycles for a finer 0Sxx phase;
+  barely audible, did not fix rough PWM/filter steps.)
 - Pitch: AHX note n (1..60, C-1..B-5) maps to Renoise note n + 11 (C-1 = 12). Samples use the NTSC Paula rate of
   AHX note C-3 (3579545.25 / 856 ≈ 4181.7 Hz) one octave up, i.e. 8363 Hz at base note C-4.
 - An import always creates a new song (`new_song_no_template`, Renoise asks to save the current one). No empty
@@ -141,7 +149,7 @@ become patterns and the pattern sequence.
   volume (observed in Renoise: loud noise after the snare of pink - sometimes). Steady states therefore end with a
   note-off when silent, or become a two-line loop when audible.
 - Instrument vibrato: pattern vibrato 0Vxy on every row after the vibrato delay until the next trigger
-  (x = speed / 2, y = depth converted to semitones at the current note in 1/8 semitones; E4x supported; verified by
+  (x = speed · song speed / 6 because the 0Vxy rate seems to follow lines (under test), y = depth converted to semitones at the current note in 1/8 semitones; E4x supported; verified by
   ear). An instrument LFO does not work: it restarts with every sample switch of the phrase (PWM) and never passes
   its delay (observed), so the LFO code was removed.
 - Every phrase note line (also 0GFF glides) carries its volume: a note with an empty volume column plays at full
@@ -155,13 +163,13 @@ become patterns and the pattern sequence.
 - 9xx square offset (only used on trigger rows): each used note/offset pair gets an unmapped variant phrase
   (simulated with that start square position, the next performance list 3xx is ignored once, like the replayer),
   selected with 0Zxx on the trigger row. Max 126 phrases per instrument.
-- Not converted yet (reported in the scripting console): Renoise-filter path of the hybrid filter strategy (filters
-  are currently always baked), E1x/E2x fine slides (pattern level), 9xx without trigger.
+- Not converted yet (reported in the scripting console): E1x/E2x fine slides (pattern level), 9xx without trigger.
 - Instruments get a default volume of -6 dB (four full-scale voices clip otherwise). The master gets a Renoise
   Maximizer with threshold -0.5 dB.
 - Every import starts with the options dialog: sample interpolation (none / linear / cubic / sinc, default none) and
   sample resolution (8 / 16 / 32 bit, default 8) and sample rate (8363 / 16726 / 33452 Hz = 1× / 2× / 4×, default
-  1×; higher rates repeat every frame, so waveform, pitch and 0Sxx offsets stay the same). The dialog starts with the saved options; Import uses the current
+  1×; higher rates repeat every frame, so waveform, pitch and 0Sxx offsets stay the same).
+  Filter resonance slider 0..0.3 (default 0.2) for the Renoise-filter path. The dialog starts with the saved options; Import uses the current
   choice, Save stores it (while the choice equals the saved options, the Save button shows "✔ Save" (bold) and is disabled).
 - Volume: the phrase's volume column carries envelope · performance volume (0..64 → 0..0x80) and overwrites the
   pattern's note volume on every phrase note line. The AHX note volume (instrument volume, Cxx, EAx/EBx, volume

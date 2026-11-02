@@ -7,6 +7,9 @@ local Waves = require('ahx.waves')
 
 local WaveStates = {}
 
+-- Filter position of the unfiltered set.
+local UNFILTERED_POS = 32
+
 -- Phrases address samples via the instrument column (00..FE).
 WaveStates.MAX_STATES = 255
 
@@ -48,8 +51,9 @@ end
 ---@param simulations AhxSimulation[]
 ---@param wave_length integer
 ---@param step integer
+---@param ignore_filter boolean
 ---@return AhxWaveStateSet
-local function collect_with_step(simulations, wave_length, step)
+local function collect_with_step(simulations, wave_length, step, ignore_filter)
   local result = { states = {}, frame_states = {}, filter_step = step }
   local index_by_key = {}
   for simulation_index, simulation in ipairs(simulations) do
@@ -58,7 +62,7 @@ local function collect_with_step(simulations, wave_length, step)
     for frame, data in ipairs(simulation.frames) do
       local state = {
         waveform = data.waveform,
-        filter_pos = quantize_filter(data.filter_pos, step),
+        filter_pos = ignore_filter and UNFILTERED_POS or quantize_filter(data.filter_pos, step),
         square_pos = data.square_pos,
         wave_length = wave_length,
       }
@@ -78,13 +82,14 @@ end
 ---Collects the states of the simulations, coarsening the filter resolution when there are too many.
 ---@param simulations AhxSimulation[]
 ---@param wave_length integer
+---@param ignore_filter boolean|nil unfiltered states only (the Renoise filter does the filter, see `FilterPath`)
 ---@return AhxWaveStateSet
-function WaveStates.collect(simulations, wave_length)
+function WaveStates.collect(simulations, wave_length, ignore_filter)
   local step = 1
-  local result = collect_with_step(simulations, wave_length, step)
+  local result = collect_with_step(simulations, wave_length, step, ignore_filter == true)
   while #result.states > WaveStates.MAX_STATES and step < 31 do
     step = step + 1
-    result = collect_with_step(simulations, wave_length, step)
+    result = collect_with_step(simulations, wave_length, step, ignore_filter == true)
   end
   return result
 end

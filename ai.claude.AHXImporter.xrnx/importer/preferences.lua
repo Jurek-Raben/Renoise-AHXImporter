@@ -6,12 +6,15 @@ local Preferences = {}
 Preferences.INTERPOLATIONS = { 'None', 'Linear', 'Cubic', 'Sinc' }
 Preferences.BIT_DEPTHS = { 8, 16, 32 }
 Preferences.SAMPLE_RATE_FACTORS = { 1, 2, 4 }
+Preferences.MAX_FILTER_RESONANCE = 0.3
+Preferences.DEFAULT_FILTER_RESONANCE = 0.2
 
 local document = renoise.Document.create('AHXImporterPreferences') {
   -- Index into INTERPOLATIONS, equal to renoise.Sample.INTERPOLATE_* (1 = none).
   interpolation = 1,
   bit_depth = 8,
   sample_rate_factor = 1,
+  filter_resonance = Preferences.DEFAULT_FILTER_RESONANCE,
 }
 
 renoise.tool().preferences = document
@@ -20,6 +23,7 @@ renoise.tool().preferences = document
 ---@field interpolation integer renoise.Sample.INTERPOLATE_* (1..4)
 ---@field bit_depth integer 8, 16 or 32
 ---@field sample_rate_factor integer 1, 2 or 4 (multiple of the base rate 8363 Hz)
+---@field filter_resonance number 0..0.3, resonance of the Renoise filter path (share of the parameter range)
 
 ---The saved options.
 ---@return AhxImportOptions
@@ -28,6 +32,7 @@ function Preferences.load()
     interpolation = document.interpolation.value,
     bit_depth = document.bit_depth.value,
     sample_rate_factor = document.sample_rate_factor.value,
+    filter_resonance = document.filter_resonance.value,
   }
 end
 
@@ -37,6 +42,7 @@ function Preferences.save(options)
   document.interpolation.value = options.interpolation
   document.bit_depth.value = options.bit_depth
   document.sample_rate_factor.value = options.sample_rate_factor
+  document.filter_resonance.value = options.filter_resonance
 end
 
 ---@param options AhxImportOptions
@@ -46,6 +52,7 @@ function Preferences.is_saved(options)
   return saved.interpolation == options.interpolation
     and saved.bit_depth == options.bit_depth
     and saved.sample_rate_factor == options.sample_rate_factor
+    and math.abs(saved.filter_resonance - options.filter_resonance) < 0.0005
 end
 
 return Preferences
