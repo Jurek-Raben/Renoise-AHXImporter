@@ -1,7 +1,9 @@
--- Finds the Renoise notes (track note + position transpose) each AHX instrument is triggered with. Every such note
--- gets its own phrase, so the phrase can play exact absolute pitches and phase-continuous sample switches.
--- Triggers with a square offset (track command 9xx) start the instrument differently; each used note/offset pair gets
--- an extra (unmapped) phrase that the pattern selects with 0Zxx.
+-- Finds the Renoise notes (track note + position transpose) each AHX instrument is triggered with, from the triggers
+-- the pattern converter records in play order (`PatternConverter.scan_triggers`). Every such note gets its own phrase,
+-- so the phrase can play exact absolute pitches and phase-continuous sample switches.
+-- A trigger that starts differently gets an extra (unmapped) variant phrase that the pattern selects with 0Zxx:
+--   * a square offset (track command 9xx) starts the instrument with another square position,
+--   * a pitch slide after the trigger (1xx, 2xx, 3xx, 5xx, E1x, E2x) is baked into the phrase (see `Portamento`).
 
 local NoteUsage = {}
 
@@ -12,52 +14,64 @@ NoteUsage.NOTE_OFFSET = 11
 NoteUsage.DEFAULT_NOTE = 36
 
 ---@class AhxNoteVariant
+---@field key string identifies the variant (`NoteUsage.variant_key`)
 ---@field note integer Renoise note
----@field square_offset integer 9xx parameter
+---@field square_offset integer|nil 9xx parameter
+---@field slides integer[]|nil slide period per frame from the trigger on (the last value holds)
+---@field uses integer number of triggers that play it
 
 ---@class AhxInstrumentUsage
 ---@field notes integer[] sorted notes of plain triggers (never empty)
----@field variants AhxNoteVariant[] sorted by square offset, then note
+---@field variants AhxNoteVariant[] most used first
 ---@field square_offsets integer[] sorted distinct 9xx parameters
 
----Renoise note of a track note in a position channel.
----@param step AhxStep
----@param transpose integer
----@return integer
-function NoteUsage.renoise_note(step, transpose)
-  return math.max(0, math.min(119, step.note + transpose + NoteUsage.NOTE_OFFSET))
+---The slide periods without the trailing repeats of the last value; nil when there is no slide at all.
+---@param slides integer[]
+---@return integer[]|nil
+local function trimmed_slides(slides)
+  local last = #slides
+  while last > 1 and slides[last] == slides[last - 1] do
+    last = last - 1
+  end
+  local result = {}
+  local any = false
+  for index = 1, last do
+    result[index] = slides[index]
+    any = any or slides[index] ~= 0
+  end
+  return any and result or nil
+end
+
+---@param note integer
+---@param square_offset integer|nil
+---@param slides integer[]|nil
+---@return string
+function NoteUsage.variant_key(note, square_offset, slides)
+  return ('%s:%d:%s'):format(square_offset or '-', note, slides and table.concat(slides, ',') or '')
 end
 
 ---@param song AhxSong
+---@param triggers AhxTrigger[]
 ---@return table<integer, AhxInstrumentUsage> usage by AHX instrument number
-function NoteUsage.scan(song)
-  local plain, variants = {}, {}
-  -- Notes without instrument are retriggered with the channel's current instrument (see `PatternConverter`), so they
-  -- need phrases too. The current instrument is followed through the position list in order (jumps ignored).
-  local current = { [0] = 0, 0, 0, 0 }
-  for position = 0, song.position_count - 1 do
-    local entry = song.positions[position]
-    for channel = 0, 3 do
-      local steps = song.tracks[entry.track[channel]]
-      for row = 0, song.track_length - 1 do
-        local step = steps and steps[row]
-        local instrument = step and step.instrument or 0
-        if instrument > 0 then
-          current[channel] = instrument
-        elseif step and step.note > 0 and step.fx ~= 0x3 and step.fx ~= 0x5 and current[channel] > 0 then
-          instrument = current[channel]
-        end
-        if instrument > 0 and step.note > 0 then
-          local note = NoteUsage.renoise_note(step, entry.transpose[channel])
-          if step.fx == 0x9 then
-            variants[instrument] = variants[instrument] or {}
-            variants[instrument][step.fx_param .. ':' .. note] = { note = note, square_offset = step.fx_param }
-          else
-            plain[instrument] = plain[instrument] or {}
-            plain[instrument][note] = true
-          end
-        end
+---@return table<string, string> variant key by trigger id (plain triggers are missing)
+function NoteUsage.from_triggers(song, triggers)
+  local plain, variants, trigger_keys = {}, {}, {}
+  for _, trigger in ipairs(triggers) do
+    local instrument = trigger.instrument
+    local slides = trimmed_slides(trigger.slides)
+    if trigger.square_offset or slides then
+      local key = NoteUsage.variant_key(trigger.note, trigger.square_offset, slides)
+      variants[instrument] = variants[instrument] or {}
+      local variant = variants[instrument][key]
+      if not variant then
+        variant = { key = key, note = trigger.note, square_offset = trigger.square_offset, slides = slides, uses = 0 }
+        variants[instrument][key] = variant
       end
+      variant.uses = variant.uses + 1
+      trigger_keys[trigger.id] = key
+    else
+      plain[instrument] = plain[instrument] or {}
+      plain[instrument][trigger.note] = true
     end
   end
 
@@ -72,16 +86,19 @@ function NoteUsage.scan(song)
       usage.notes[1] = NoteUsage.DEFAULT_NOTE
     end
 
+    -- Most used variants first: they keep their phrases when the phrase limit is reached.
     local offsets = {}
     for _, variant in pairs(variants[number] or {}) do
       usage.variants[#usage.variants + 1] = variant
-      offsets[variant.square_offset] = true
+      if variant.square_offset then
+        offsets[variant.square_offset] = true
+      end
     end
     table.sort(usage.variants, function(a, b)
-      if a.square_offset ~= b.square_offset then
-        return a.square_offset < b.square_offset
+      if a.uses ~= b.uses then
+        return a.uses > b.uses
       end
-      return a.note < b.note
+      return a.key < b.key
     end)
     for offset in pairs(offsets) do
       usage.square_offsets[#usage.square_offsets + 1] = offset
@@ -90,7 +107,7 @@ function NoteUsage.scan(song)
 
     result[number] = usage
   end
-  return result
+  return result, trigger_keys
 end
 
 return NoteUsage

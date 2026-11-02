@@ -86,8 +86,9 @@ become patterns and the pattern sequence.
   - `filter_path.lua` – Renoise-filter path decision and AHX cutoff per frame.
   - `resolution.lua` – automatic pattern resolution and the 0Vxy vibrato speed.
   - `band_limit.lua` – band-limited resynthesis of a waveform cycle.
-  - `note_usage.lua` – the notes each instrument is triggered with (one phrase per note) and its 9xx note/offset
-    variants.
+  - `note_usage.lua` – the notes each instrument is triggered with (one phrase per note) and its variants (9xx
+    square offset and/or baked pitch slide), from the triggers the pattern converter records in play order.
+  - `portamento.lua` – port of the track portamento (1xx/2xx/3xx/5xx/E1x/E2x, `PeriodSlide*`).
 - `importer/` – everything that touches the Renoise API:
   - `controller.lua` – workflow: parse → `ui/options_dialog.lua` → `song_creator.lua` (new song without template) →
     `process_slicer.lua` (sliced build with progress dialog, ported from SongMerger) → summary.
@@ -113,7 +114,7 @@ become patterns and the pattern sequence.
   - PWM (square positions) is always baked: one sample per used pulse width.
   - Renoise-filter path (`ahx/filter_path.lua`, `importer/filter_writer.lua`): when all simulated filter positions
     stay on one side (low-pass 1..32 or high-pass 32..63, 32 = open) and nothing else changes the sample during a
-    note (waveform, pulse width, performance portamento), the samples are unfiltered and every phrase gets a sample of
+    note (waveform, pulse width, performance portamento, baked track slides), the samples are unfiltered and every phrase gets a sample of
     its own with its own modulation set: low-/high-pass filter (`LP Clean` etc.), resonance from the import options (0..0.3, default 0.136), cutoff input at maximum and a
     cutoff envelope (operator multiply, points mode, one point per frame, loop = simulation loop). The cutoff per
     frame is the AHX filter's: fc = fs · asin(f / 2) / π with f = (8 + 3 · step) · 1.25 / 100 and fs = Paula rate of
@@ -170,10 +171,12 @@ become patterns and the pattern sequence.
   releases over the hard cut frames, otherwise the note-off cuts.
 - All samples use new note action "note cut": every sample switch of a phrase is a new note, and the old one must stop
   at once (with "note off", the AHDSR release let old notes fade underneath and modulated the volume; verified).
-- 9xx square offset (only used on trigger rows): each used note/offset pair gets an unmapped variant phrase
-  (simulated with that start square position, the next performance list 3xx is ignored once, like the replayer),
-  selected with 0Zxx on the trigger row. Max 126 phrases per instrument.
-- Not converted yet (reported in the scripting console): E1x/E2x fine slides (pattern level), 9xx without trigger.
+- Variant phrases: a trigger with a 9xx square offset and/or a pitch slide after it gets an unmapped variant phrase,
+  selected with 0Zxx on the trigger row (one per distinct note / offset / slide; key = `NoteUsage.variant_key`).
+  9xx: simulated with that start square position (the next performance list 3xx is ignored once, like the replayer;
+  only used on trigger rows). Max 126 phrases per instrument: the most used variants are kept, the notes of dropped
+  ones get a plain phrase (reported).
+- Not converted yet (reported in the scripting console): 9xx without trigger.
 - Instruments get a default volume of -6 dB (four full-scale voices clip otherwise). The master gets a Renoise
   Maximizer with threshold -0.5 dB.
 - Every import starts with the options dialog: sample interpolation (none / linear / cubic / sinc, default none) and
@@ -206,8 +209,17 @@ become patterns and the pattern sequence.
 - Note cut ECx: a volume cut (0Cxy) does not last because the phrase rewrites the note volume, so a row without note
   gets a note-off with delay (x frames); only with a note on the same row 0Cxy is used.
 - Keyzones keep "Vel->Vol" enabled: extra samples use velocity range 0..0, which is then never triggered.
-- Pitch slides (1xx/2xx/3xx/5xx): AHX period steps per frame are converted to semitones at the current note;
-  Renoise 0U/0D slide by xx/32 semitones per tick, 0G glides by xx/64 semitones per tick (both verified by ear).
+- Pitch slides (1xx/2xx/3xx/5xx/E1x/E2x) are baked into variant phrases. Pattern slides (0U/0D/0G) and an automated
+  instrument pitchbend (tried: *Instr. MIDI Control, pitchbend macro mapped via a generated .xrni) change the pitch
+  behind the phrase's back, so every sample switch (PWM) starts at the wrong 0Sxx phase (stuttering slide, mobby -
+  good day, AHX 1 / instrument 02). The pattern converter runs the replayer's portamento per frame
+  (`ahx/portamento.lua`; reset by an instrument, kept by a note without instrument; the step's part runs after a note
+  delay) and records for every trigger the slide period per frame until the channel's next trigger
+  (`PatternConverter.scan_triggers`, a pre-pass over the sequence; triggers are identified by segment index, row and
+  channel). The phrase adds it to the period of every frame except fixed performance notes (exact pitch, fine tune
+  samples, correct phase); an audible steady state is repeated until the slide is over before it loops. Instruments
+  with slides do not use the Renoise-filter path. A tone portamento note does not trigger (like the replayer); with
+  an instrument on the row, it retriggers at the current note.
 - A note without instrument is retriggered with the channel's current instrument (AHX only changes the pitch; a 0GFF
   glide fought with the absolute phrase pitches and sounded distorted with PWM, syphus - galactic olympics); the note
   volume and the running vibrato stay. Those notes get phrases too (`NoteUsage`). An instrument without note

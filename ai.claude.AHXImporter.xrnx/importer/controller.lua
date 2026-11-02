@@ -1,8 +1,11 @@
 -- Import workflow: pick or receive a file, parse it, ask for the import options, create a new song and build it
 -- sliced with a progress dialog.
 
+local NoteUsage = require('ahx.note_usage')
 local Parser = require('ahx.parser')
+local PatternConverter = require('ahx.pattern_converter')
 local Resolution = require('ahx.resolution')
+local Sequence = require('ahx.sequence')
 local Timing = require('ahx.timing')
 local InstrumentWriter = require('importer.instrument_writer')
 local PatternWriter = require('importer.pattern_writer')
@@ -37,7 +40,10 @@ local function build_song(song, file_name, options)
   if not plan.exact then
     report('speed combination (rows approximated)')
   end
-  local variant_phrases = InstrumentWriter.write_all(song, plan, report, options)
+  -- Pre-pass over the play order: the triggered notes, square offsets and following slides decide the phrases.
+  local triggers = PatternConverter.scan_triggers(song, plan, Sequence.build(song, 0))
+  local usage, trigger_keys = NoteUsage.from_triggers(song, triggers)
+  local variant_phrases = InstrumentWriter.write_all(song, plan, report, options, usage)
   local lines_per_row = options.lines_per_row
   if lines_per_row == 0 then
     local highest_x
@@ -49,7 +55,7 @@ local function build_song(song, file_name, options)
     lines_per_row = lines_per_row / 2
     report('pattern resolution reduced (more than 512 lines per pattern)')
   end
-  local summary = PatternWriter.write_song(song, 0, plan, report, variant_phrases, lines_per_row)
+  local summary = PatternWriter.write_song(song, 0, plan, report, variant_phrases, lines_per_row, trigger_keys)
   summary.unsupported = unsupported
 
   rns.selected_instrument_index = 1

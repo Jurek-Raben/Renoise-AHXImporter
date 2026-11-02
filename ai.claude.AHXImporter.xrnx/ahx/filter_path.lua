@@ -29,8 +29,13 @@ end
 ---Decides whether an instrument can use the Renoise filter.
 ---@param simulations AhxSimulation[]
 ---@param wave_length integer
+---@param slides boolean the instrument has variant phrases with a baked pitch slide (fine tune sample switches)
 ---@return 'low'|'high'|nil side nil when the filter has to be baked (or there is no filter)
-function FilterPath.analyze(simulations, wave_length)
+function FilterPath.analyze(simulations, wave_length, slides)
+  if slides then
+    -- A baked slide switches the fine tune sample during the note, which would restart the cutoff envelope.
+    return nil
+  end
   local low, high = false, false
   local wave = math.min(wave_length, 5)
   for _, simulation in ipairs(simulations) do

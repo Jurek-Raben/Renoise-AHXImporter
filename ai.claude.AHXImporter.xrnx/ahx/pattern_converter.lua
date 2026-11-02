@@ -1,11 +1,16 @@
 -- Converts AHX track steps of a segment into neutral pattern data (no Renoise API), keeping per-channel state
--- (current note, instrument, volume, glide speed) and the tempo across segments.
+-- (current note, instrument, volume, portamento) and the tempo across segments.
 --
 -- Output cell values are Renoise values: note 0..119, instrument 0-based, volume 0..0x80, delay 0..255,
 -- effects as { number = 'ZT', amount = 0..255 }.
+--
+-- Pitch slides are not pattern commands: the converter runs the track portamento per frame and records, for every
+-- trigger, the slide periods until the channel's next trigger (`triggers`). Those become variant phrases with the
+-- slide baked in (see `Portamento`, `NoteUsage`), selected with 0Zxx on the trigger row.
 
 local bit = require('bit')
 
+local Portamento = require('ahx.portamento')
 local Resolution = require('ahx.resolution')
 local Tables = require('ahx.tables')
 local Timing = require('ahx.timing')
@@ -28,6 +33,13 @@ local FULL_VOLUME = 0x40
 ---@field delay integer|nil
 ---@field effects { number: string, amount: integer }[]
 
+---@class AhxTrigger
+---@field id string `segment index .. ':' .. row .. ':' .. channel`
+---@field instrument integer AHX instrument number
+---@field note integer Renoise note the phrase is triggered with
+---@field square_offset integer|nil 9xx parameter on the trigger row
+---@field slides integer[] slide period per frame from the trigger frame on, until the channel's next trigger
+
 ---@class AhxPatternData
 ---@field segment AhxSegment
 ---@field number_of_lines integer
@@ -39,14 +51,18 @@ local FULL_VOLUME = 0x40
 ---@param song AhxSong
 ---@param plan AhxTimingPlan
 ---@param report fun(name: string) collects commands that are not converted (yet)
----@param variant_phrases table<integer, table<string, integer>> 9xx phrase index by instrument and offset:note
+---@param variant_phrases table<integer, table<string, integer>> variant phrase index by instrument and variant key
 ---@param lines_per_row integer|nil pattern lines per AHX row (pattern resolution option, default 1)
+---@param trigger_keys table<string, string>|nil variant key by trigger id (from a previous pass, see `NoteUsage`)
 ---@return table converter
-function PatternConverter.new(song, plan, report, variant_phrases, lines_per_row)
+function PatternConverter.new(song, plan, report, variant_phrases, lines_per_row, trigger_keys)
   local self = setmetatable({}, PatternConverter)
   self.song = song
   self.plan = plan
   self.variant_phrases = variant_phrases or {}
+  self.trigger_keys = trigger_keys or {}
+  ---@type AhxTrigger[]
+  self.triggers = {}
   self.lines_per_row = lines_per_row or 1
   self.report_unsupported = function(_, name)
     report(name)
@@ -59,7 +75,10 @@ function PatternConverter.new(song, plan, report, variant_phrases, lines_per_row
       instrument = 0,
       volume = FULL_VOLUME,
       channel_volume = nil,
-      glide = 0,
+      portamento = Portamento.new(),
+      -- Trigger whose slide periods are being recorded.
+      trigger = nil,
+      step_delay = 0,
       vibrato = nil,
       frames = 0,
       track_master_volume = FULL_VOLUME,
@@ -72,12 +91,8 @@ function PatternConverter.new(song, plan, report, variant_phrases, lines_per_row
   return self
 end
 
--- Renoise slide units per semitone and tick. Verified by ear in Renoise (syphus - better days): xx/16 was half as
--- fast as the AHX original, so 0Uxx / 0Dxx / 0Gxx slide by xx/32 semitones per tick.
-local SLIDE_UNITS_PER_SEMITONE = 32
--- The glide (0Gxx, from 3xx/5xx) is scaled differently: verified by ear, it needs xx/64 semitones per tick
--- (syphus - better days, AHX 2, pattern 2, line 15: G10 instead of G08).
-local GLIDE_UNITS_PER_SEMITONE = 64
+-- Phrases have at most 512 lines, so longer slides are not recorded.
+local MAX_SLIDE_FRAMES = 512
 
 -- Instrument vibrato as pattern vibrato 0Vxy on every row once the vibrato delay has run out (an LFO in the
 -- instrument restarts with every sample switch of the phrase).
@@ -89,22 +104,6 @@ local GLIDE_UNITS_PER_SEMITONE = 64
 -- small periods). It is converted per row at the current note; Renoise depth is semitone-based.
 -- y = depth in 1/8 semitones (verified by ear: xeron - 64k is all you need, syphus - better days).
 local VIBRATO_DEPTH_UNITS_PER_SEMITONE = 8
-
----Renoise slide amount (per tick = per AHX frame) for an AHX period slide at a note.
----@param period_step integer period change per frame
----@param note integer|nil Renoise note the slide starts from
----@param units_per_semitone integer
----@return integer
-local function slide_amount(period_step, note, units_per_semitone)
-  if period_step == 0 then
-    return 0
-  end
-  local ahx_note = math.max(1, math.min(60, (note or 36) - NOTE_OFFSET))
-  local period = Tables.PERIODS[ahx_note]
-  local target = math.max(1, period - period_step)
-  local semitones = math.abs(12 * math.log(period / target) / math.log(2))
-  return math.max(1, math.min(255, math.floor(semitones * units_per_semitone + 0.5)))
-end
 
 ---Peak vibrato deviation in semitones for an AHX vibrato depth at a note (average of up and down).
 ---@param depth integer 0..15
@@ -162,9 +161,11 @@ function PatternConverter:convert_step(channel, step, transpose, next_instrument
     self:add_tempo(cell, param)
   end
 
-  -- Note delay
+  -- Note delay (the replayer processes the whole step, also its portamento, after the delay)
+  state.step_delay = 0
   if fx == 0xe and high == 0xd and low > 0 and low < self.tempo then
     cell.delay_frames = low
+    state.step_delay = low
   end
 
   local instrument = step.instrument
@@ -176,16 +177,13 @@ function PatternConverter:convert_step(channel, step, transpose, next_instrument
     cell.instrument = instrument - 1
   end
 
+  -- Tone portamento (3xx, 5xx): the note does not trigger, it only sets the slide target (like the replayer). An
+  -- instrument on the same row retriggers at the current note, like an instrument without note.
   local tone_portamento = fx == 0x3 or fx == 0x5
   if tone_portamento then
-    if param ~= 0 and fx == 0x3 then
-      state.glide = slide_amount(param, state.note or note, GLIDE_UNITS_PER_SEMITONE)
+    if instrument > 0 then
+      cell.note = state.note
     end
-    if note then
-      cell.note = note
-      state.note = note
-    end
-    add_effect(cell, '0G', state.glide)
   elseif note then
     cell.note = note
     if instrument == 0 and state.note and state.instrument > 0 then
@@ -207,11 +205,22 @@ function PatternConverter:convert_step(channel, step, transpose, next_instrument
     cell.instrument = nil
   end
 
-  if fx == 0x1 then
-    add_effect(cell, '0U', slide_amount(param, state.note, SLIDE_UNITS_PER_SEMITONE))
-  elseif fx == 0x2 then
-    add_effect(cell, '0D', slide_amount(param, state.note, SLIDE_UNITS_PER_SEMITONE))
-  elseif fx == 0xc then
+  -- Variant phrase of the trigger: square offset (9xx) and/or the slide that follows (1xx, 2xx, 3xx, 5xx, E1x, E2x).
+  -- 0Zxx plays phrase xx of the instrument for this note, also in keymap mode (verified by ear).
+  if cell.instrument then
+    local key = self.trigger_keys[self.row_id .. ':' .. channel]
+    if key then
+      local variants = self.variant_phrases[state.instrument]
+      local index = variants and variants[key]
+      if index then
+        add_effect(cell, '0Z', index)
+      else
+        self:report_unsupported('variant phrase beyond the phrase limit (played without slide / 9xx)')
+      end
+    end
+  end
+
+  if fx == 0xc then
     if param <= 0x40 then
       state.volume = param
     elseif param - 0x50 <= 0x40 then
@@ -239,20 +248,13 @@ function PatternConverter:convert_step(channel, step, transpose, next_instrument
         state.cut = true
         state.hard_cut = 0
       end
-    elseif high == 0x1 or high == 0x2 then
-      self:report_unsupported('E1x/E2x fine slide')
     elseif high == 0x4 then
       state.new_vibrato_depth = low
     end
   elseif fx == 0x9 then
-    -- The square offset changes how the instrument starts: its variant phrase is selected with 0Zxx.
-    -- 0Zxx plays phrase xx of the instrument for this note, also in keymap mode (verified by ear).
-    local variants = self.variant_phrases[state.instrument]
-    local index = cell.instrument and cell.note and variants and variants[param .. ':' .. cell.note]
-    if index then
-      add_effect(cell, '0Z', index)
-    else
-      self:report_unsupported('9xx without trigger or beyond the phrase limit')
+    -- The square offset changes how the instrument starts (variant phrase, see above).
+    if not cell.instrument then
+      self:report_unsupported('9xx without trigger')
     end
   elseif fx == 0x4 then
     self:report_unsupported('4xx filter override')
@@ -291,6 +293,36 @@ function PatternConverter:convert_step(channel, step, transpose, next_instrument
   self:add_vibrato(cell, state)
 
   return cell
+end
+
+---Runs the track portamento of one channel through the frames of a row (the step's part in its frame: at the row
+---start or after the note delay) and records the slide period of every frame for the channel's current trigger.
+---@param channel integer 1..4
+---@param cell AhxCell the converted cell of the step (a trigger when it has an instrument)
+---@param step AhxStep
+function PatternConverter:advance_portamento(channel, cell, step)
+  local state = self.channels[channel]
+  local portamento = state.portamento
+  for frame = 0, self.tempo - 1 do
+    if frame == state.step_delay then
+      Portamento.process_step(portamento, step)
+      if cell.instrument then
+        state.trigger = {
+          id = self.row_id .. ':' .. channel,
+          instrument = state.instrument,
+          note = cell.note,
+          square_offset = step.fx == 0x9 and step.fx_param or nil,
+          slides = {},
+        }
+        self.triggers[#self.triggers + 1] = state.trigger
+      end
+    end
+    Portamento.process_frame(portamento)
+    local trigger = state.trigger
+    if trigger and #trigger.slides < MAX_SLIDE_FRAMES then
+      trigger.slides[#trigger.slides + 1] = portamento.period
+    end
+  end
 end
 
 ---Writes 0Vxy on rows where the instrument vibrato is running (after its delay, until the next trigger).
@@ -464,8 +496,9 @@ end
 
 ---Converts one segment into pattern data.
 ---@param segment AhxSegment
+---@param segment_index integer index of the segment in the sequence (identifies triggers across passes)
 ---@return AhxPatternData
-function PatternConverter:convert(segment)
+function PatternConverter:convert(segment, segment_index)
   local song = self.song
   local position = song.positions[segment.position]
   local data = {
@@ -491,6 +524,7 @@ function PatternConverter:convert(segment)
       end
     end
 
+    self.row_id = segment_index .. ':' .. row
     local cells = {}
     for channel = 1, 4 do
       local steps = song.tracks[position.track[channel - 1]]
@@ -501,6 +535,7 @@ function PatternConverter:convert(segment)
         next_step = song.tracks[next_position.track[channel - 1]][0]
       end
       cells[channel] = self:convert_step(channel, steps[row], position.transpose[channel - 1], next_step.instrument)
+      self:advance_portamento(channel, cells[channel], steps[row])
     end
     self:apply_channel_volumes(cells)
 
@@ -522,6 +557,20 @@ function PatternConverter:convert(segment)
 
   data.key = table.concat(key_parts, ';')
   return data
+end
+
+---All triggers of a sequence with the slide that follows each of them (pre-pass before the instruments are written:
+---the slides decide the variant phrases).
+---@param song AhxSong
+---@param plan AhxTimingPlan
+---@param sequence AhxSequence
+---@return AhxTrigger[]
+function PatternConverter.scan_triggers(song, plan, sequence)
+  local converter = PatternConverter.new(song, plan, function() end, {}, 1)
+  for index, segment in ipairs(sequence.segments) do
+    converter:convert(segment, index)
+  end
+  return converter.triggers
 end
 
 return PatternConverter

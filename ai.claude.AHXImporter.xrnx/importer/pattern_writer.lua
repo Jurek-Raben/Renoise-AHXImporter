@@ -50,14 +50,15 @@ end
 ---@param subsong integer
 ---@param plan AhxTimingPlan
 ---@param report fun(name: string) collects commands that are not converted (yet)
----@param variant_phrases table<integer, table<string, integer>> 9xx phrase index by instrument and offset:note
+---@param variant_phrases table<integer, table<string, integer>> variant phrase index by instrument and variant key
 ---@param lines_per_row integer pattern lines per AHX row (pattern resolution option)
+---@param trigger_keys table<string, string> variant key by trigger id (`NoteUsage.from_triggers`)
 ---@return table summary { patterns, sequence_length, loop_to, truncated }
-function PatternWriter.write_song(song, subsong, plan, report, variant_phrases, lines_per_row)
+function PatternWriter.write_song(song, subsong, plan, report, variant_phrases, lines_per_row, trigger_keys)
   local rns = renoise.song()
   local sequencer = rns.sequencer
   local sequence = Sequence.build(song, subsong)
-  local converter = PatternConverter.new(song, plan, report, variant_phrases, lines_per_row)
+  local converter = PatternConverter.new(song, plan, report, variant_phrases, lines_per_row, trigger_keys)
 
   local lpb, tpl = Timing.for_speed(plan, Timing.INITIAL_SPEED, lines_per_row)
   rns.transport.bpm = plan.bpm
@@ -70,7 +71,7 @@ function PatternWriter.write_song(song, subsong, plan, report, variant_phrases, 
   local uses_delay = false
 
   for index, segment in ipairs(sequence.segments) do
-    local data = converter:convert(segment)
+    local data = converter:convert(segment, index)
     local pattern_index = pattern_by_key[data.key]
 
     if not pattern_index then

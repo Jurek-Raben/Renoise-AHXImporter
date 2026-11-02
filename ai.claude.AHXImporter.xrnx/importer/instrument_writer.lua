@@ -1,9 +1,8 @@
 -- Creates Renoise instruments from AHX instruments: one sample per waveform state of the simulated notes, and one
 -- phrase per triggered note that plays it frame by frame (sample switches, pitch, envelope volume). Triggers with a
--- square offset (9xx) get extra variant phrases.
+-- square offset (9xx) or a following pitch slide get extra variant phrases.
 
 local FilterPath = require('ahx.filter_path')
-local NoteUsage = require('ahx.note_usage')
 local PhraseBuilder = require('ahx.phrase_builder')
 local Simulator = require('ahx.simulator')
 local WaveStates = require('ahx.wave_states')
@@ -28,7 +27,38 @@ local MAX_PHRASES = 126
 local FINE_STEPS_PER_SEMITONE = 16
 local FINE_TUNE_PER_SEMITONE = 128
 
----Builds the plain phrases (one per note) and the 9xx variant phrases of an instrument.
+---Fits the phrases into the phrase limit: the most used variants are kept, and the notes of dropped variants get a
+---plain phrase (their triggers play without slide / square offset).
+---@param usage AhxInstrumentUsage
+---@return AhxInstrumentUsage usage with the kept variants and the needed plain notes
+local function fit_phrases(usage)
+  for kept = #usage.variants, 0, -1 do
+    local notes, seen = {}, {}
+    local function add(note)
+      if not seen[note] then
+        seen[note] = true
+        notes[#notes + 1] = note
+      end
+    end
+    for _, note in ipairs(usage.notes) do
+      add(note)
+    end
+    for index = kept + 1, #usage.variants do
+      add(usage.variants[index].note)
+    end
+    if #notes + kept <= MAX_PHRASES then
+      table.sort(notes)
+      local variants = {}
+      for index = 1, kept do
+        variants[index] = usage.variants[index]
+      end
+      return { notes = notes, variants = variants, square_offsets = usage.square_offsets }
+    end
+  end
+  return usage
+end
+
+---Builds the plain phrases (one per note) and the variant phrases (9xx, baked slides) of an instrument.
 ---@param simulations AhxSimulation[]
 ---@param state_set AhxWaveStateSet
 ---@param simulation_by_offset table<integer, integer>
@@ -36,7 +66,7 @@ local FINE_TUNE_PER_SEMITONE = 128
 ---@param frames_per_second number
 ---@param fine_steps integer
 ---@return AhxPhraseData[] phrases
----@return { data: AhxPhraseData, square_offset: integer }[] variants
+---@return { data: AhxPhraseData, variant: AhxNoteVariant }[] variants
 local function build_phrases(simulations, state_set, simulation_by_offset, usage, frames_per_second, fine_steps)
   local phrases = {}
   for index, note in ipairs(usage.notes) do
@@ -47,10 +77,7 @@ local function build_phrases(simulations, state_set, simulation_by_offset, usage
 
   local variants = {}
   for _, variant in ipairs(usage.variants) do
-    if #phrases + #variants >= MAX_PHRASES then
-      break
-    end
-    local simulation_index = simulation_by_offset[variant.square_offset]
+    local simulation_index = variant.square_offset and simulation_by_offset[variant.square_offset] or 1
     variants[#variants + 1] = {
       data = PhraseBuilder.build(
         simulations[simulation_index],
@@ -58,9 +85,10 @@ local function build_phrases(simulations, state_set, simulation_by_offset, usage
         simulation_index,
         variant.note,
         frames_per_second,
-        fine_steps
+        fine_steps,
+        variant.slides
       ),
-      square_offset = variant.square_offset,
+      variant = variant,
     }
     variants[#variants].data.simulation_index = simulation_index
     ProcessSlicer.step()
@@ -176,9 +204,11 @@ end
 ---@param usage AhxInstrumentUsage
 ---@param report fun(name: string)
 ---@param options AhxImportOptions
----@return table<string, integer> variant phrase index by `square_offset .. ':' .. note`
+---@return table<string, integer> variant phrase index by variant key
 function InstrumentWriter.write(target, song, number, plan, usage, report, options)
   local instrument = song.instruments[number]
+  local variant_count = #usage.variants
+  usage = fit_phrases(usage)
   local name = ('AHX %02d %s'):format(number, instrument.name)
 
   -- Simulation 1 is the plain note, the others start with a 9xx square offset.
@@ -190,7 +220,11 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
   end
   -- Renoise-filter path: a one-sided filter sweep without other sample changes is done by the Renoise filter, so the
   -- states are collected unfiltered (see `FilterPath`).
-  local filter_side = FilterPath.analyze(simulations, instrument.wave_length)
+  local slides = false
+  for _, variant in ipairs(usage.variants) do
+    slides = slides or variant.slides ~= nil
+  end
+  local filter_side = FilterPath.analyze(simulations, instrument.wave_length, slides)
   local state_set = WaveStates.collect(simulations, instrument.wave_length, filter_side ~= nil)
   local frames_per_second = 50 * plan.speed_multiplier
   if filter_side then
@@ -233,8 +267,8 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
     fine_steps = fine_steps / 2
     ProcessSlicer.step(('Instrument %02d: reducing fine tune'):format(number))
   end
-  if #variants < #usage.variants then
-    report('9xx variants beyond the phrase limit (played without offset)')
+  if #variants < variant_count then
+    report('variant phrases beyond the phrase limit (played without slide / 9xx)')
   end
   if fine_steps < FINE_STEPS_PER_SEMITONE then
     report('fine pitch resolution reduced (too many waveform states)')
@@ -337,10 +371,10 @@ end
 ---@param plan AhxTimingPlan
 ---@param report fun(name: string) collects features that are not converted (yet)
 ---@param options AhxImportOptions
+---@param usage table<integer, AhxInstrumentUsage> notes and variants per AHX instrument number (`NoteUsage`)
 ---@return table<integer, table<string, integer>> variant phrase indices by AHX instrument number
-function InstrumentWriter.write_all(song, plan, report, options)
+function InstrumentWriter.write_all(song, plan, report, options, usage)
   local rns = renoise.song()
-  local usage = NoteUsage.scan(song)
   local variant_phrases = {}
 
   for number = 1, song.instrument_count do

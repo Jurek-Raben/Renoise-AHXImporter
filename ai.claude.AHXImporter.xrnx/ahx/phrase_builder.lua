@@ -6,7 +6,8 @@
 -- switched sample at that position with a sample offset (0Sxx). This depends on the pitch, so there is one phrase per
 -- triggered note.
 --
--- Pitch: the exact pitch comes from the AHX period (performance note + portamento). The phrase note column only has
+-- Pitch: the exact pitch comes from the AHX period (performance note + performance portamento, plus the track
+-- portamento for variant phrases with a baked slide, see `Portamento`). The phrase note column only has
 -- semitones, so the rest is carried by the sample: every sample is a waveform state with a fine tune (`fine_steps`
 -- per semitone). A line addresses its sample by `state_index` and `fine_index`; the instrument writer turns these
 -- pairs into sample indices.
@@ -73,13 +74,15 @@ end
 ---right for as long as possible (only the repeats of the last loop pass can drift).
 ---A one-frame loop is a steady state. A phrase must keep running to keep its volume (after a one-shot phrase ends, the
 ---sample plays on at the pattern volume), so a silent steady state ends with a note-off and an audible one becomes a
----two-line loop (Renoise needs loop end > loop start).
+---two-line loop (Renoise needs loop end > loop start). A baked slide must not run inside the loop: the steady state is
+---repeated until `min_length` frames (the slide's length) before it loops.
 ---@param simulation AhxSimulation
+---@param min_length integer frames before an audible steady state may loop
 ---@return AhxFrame[] frames
 ---@return integer|nil loop_start
 ---@return integer|nil loop_end
 ---@return boolean note_off end the phrase with a note-off line after the frames
-local function unrolled_frames(simulation)
+local function unrolled_frames(simulation, min_length)
   local frames = {}
   for index, frame in ipairs(simulation.frames) do
     frames[index] = frame
@@ -93,6 +96,9 @@ local function unrolled_frames(simulation)
     local last = frames[#frames]
     if last.volume == 0 then
       return frames, nil, nil, true
+    end
+    while #frames < math.min(min_length, MAX_LINES - 1) do
+      frames[#frames + 1] = last
     end
     frames[#frames + 1] = last
     return frames, #frames - 1, #frames, false
@@ -116,9 +122,19 @@ end
 ---@param trigger_note integer Renoise note the phrase plays
 ---@param frames_per_second number 50 · speed multiplier
 ---@param fine_steps integer fine tune steps per semitone (1 = semitones only)
+---@param slides integer[]|nil track portamento period per frame from the trigger on (the last value holds)
 ---@return AhxPhraseData
-function PhraseBuilder.build(simulation, state_set, simulation_index, trigger_note, frames_per_second, fine_steps)
-  local frames, loop_start, loop_end, note_off = unrolled_frames(simulation)
+function PhraseBuilder.build(
+  simulation,
+  state_set,
+  simulation_index,
+  trigger_note,
+  frames_per_second,
+  fine_steps,
+  slides
+)
+  slides = slides or {}
+  local frames, loop_start, loop_end, note_off = unrolled_frames(simulation, #slides)
   local data = {
     note = trigger_note,
     number_of_lines = note_off and #frames + 1 or #frames,
@@ -145,7 +161,12 @@ function PhraseBuilder.build(simulation, state_set, simulation_index, trigger_no
       -- The replayer plays `performance note + track note - 1`.
       ahx_note = frame.instr_period + track_ahx_note - 1
     end
-    local pitch = clamp(exact_pitch(ahx_note, frame.perf_slide_period), 0, 119)
+    -- The replayer adds the track portamento to every note except fixed performance notes.
+    local slide = 0
+    if not frame.fixed and #slides > 0 then
+      slide = slides[math.min(index, #slides)]
+    end
+    local pitch = clamp(exact_pitch(ahx_note, frame.perf_slide_period + slide), 0, 119)
     pitch = math.floor(pitch * fine_steps + 0.5) / fine_steps
     -- Unrolled frames repeat the simulated loop, so their state index is the one of the simulated frame.
     local simulated_index = index

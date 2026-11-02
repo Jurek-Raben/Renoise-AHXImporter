@@ -67,14 +67,14 @@ local function insert_phrase(instrument, index, data, phrase_lpb, name)
   return phrase
 end
 
----Creates one keymapped phrase per triggered note, followed by unmapped variant phrases (9xx square offsets) that
----the pattern selects with 0Zxx.
+---Creates one keymapped phrase per triggered note, followed by unmapped variant phrases (9xx square offset and/or
+---baked pitch slide) that the pattern selects with 0Zxx.
 ---@param instrument renoise.Instrument
 ---@param phrases AhxPhraseData[] sorted by note
----@param variants { data: AhxPhraseData, square_offset: integer }[]
+---@param variants { data: AhxPhraseData, variant: AhxNoteVariant }[]
 ---@param phrase_lpb integer
 ---@param name string
----@return table<string, integer> phrase index by `square_offset .. ':' .. note`
+---@return table<string, integer> phrase index by variant key
 function PhraseWriter.write(instrument, phrases, variants, phrase_lpb, name)
   instrument.phrase_playback_mode = renoise.Instrument.PHRASES_PLAY_KEYMAP
 
@@ -91,18 +91,19 @@ function PhraseWriter.write(instrument, phrases, variants, phrase_lpb, name)
   end
 
   local variant_index = {}
-  for offset, variant in ipairs(variants) do
+  for offset, entry in ipairs(variants) do
     local index = #phrases + offset
-    local data = variant.data
-    insert_phrase(
-      instrument,
-      index,
-      data,
-      phrase_lpb,
-      ('%s %s 9%02X'):format(name, note_name(data.note), variant.square_offset)
-    )
-    variant_index[variant.square_offset .. ':' .. data.note] = index
-    ProcessSlicer.step(('%s: phrase %s 9%02X'):format(name, note_name(data.note), variant.square_offset))
+    local data, variant = entry.data, entry.variant
+    local label = note_name(data.note)
+    if variant.square_offset then
+      label = ('%s 9%02X'):format(label, variant.square_offset)
+    end
+    if variant.slides then
+      label = label .. ' slide'
+    end
+    insert_phrase(instrument, index, data, phrase_lpb, ('%s %s'):format(name, label))
+    variant_index[variant.key] = index
+    ProcessSlicer.step(('%s: phrase %s'):format(name, label))
   end
   return variant_index
 end
