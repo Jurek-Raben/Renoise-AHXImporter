@@ -51,14 +51,15 @@ end
 ---@param plan AhxTimingPlan
 ---@param report fun(name: string) collects commands that are not converted (yet)
 ---@param variant_phrases table<integer, table<string, integer>> 9xx phrase index by instrument and offset:note
+---@param lines_per_row integer pattern lines per AHX row (pattern resolution option)
 ---@return table summary { patterns, sequence_length, loop_to, truncated }
-function PatternWriter.write_song(song, subsong, plan, report, variant_phrases)
+function PatternWriter.write_song(song, subsong, plan, report, variant_phrases, lines_per_row)
   local rns = renoise.song()
   local sequencer = rns.sequencer
   local sequence = Sequence.build(song, subsong)
-  local converter = PatternConverter.new(song, plan, report, variant_phrases)
+  local converter = PatternConverter.new(song, plan, report, variant_phrases, lines_per_row)
 
-  local lpb, tpl = Timing.for_speed(plan, Timing.INITIAL_SPEED)
+  local lpb, tpl = Timing.for_speed(plan, Timing.INITIAL_SPEED, lines_per_row)
   rns.transport.bpm = plan.bpm
   rns.transport.lpb = lpb
   rns.transport.tpl = tpl

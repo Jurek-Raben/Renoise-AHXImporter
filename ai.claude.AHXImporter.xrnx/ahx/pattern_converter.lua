@@ -6,6 +6,7 @@
 
 local bit = require('bit')
 
+local Resolution = require('ahx.resolution')
 local Tables = require('ahx.tables')
 local Timing = require('ahx.timing')
 
@@ -19,6 +20,8 @@ local FULL_VOLUME = 0x40
 ---@class AhxCell
 ---@field note integer|nil
 ---@field note_off boolean|nil
+---@field delay_frames integer|nil frames after the row start (note delay, note cut, hard cut); placed by `convert`
+---@field vibrato { amount: integer, first_sub: integer }|nil 0Vxy from sub line `first_sub` on; placed by `convert`
 ---@field instrument integer|nil
 ---@field volume integer|nil
 ---@field delay integer|nil
@@ -36,12 +39,14 @@ local FULL_VOLUME = 0x40
 ---@param plan AhxTimingPlan
 ---@param report fun(name: string) collects commands that are not converted (yet)
 ---@param variant_phrases table<integer, table<string, integer>> 9xx phrase index by instrument and offset:note
+---@param lines_per_row integer|nil pattern lines per AHX row (pattern resolution option, default 1)
 ---@return table converter
-function PatternConverter.new(song, plan, report, variant_phrases)
+function PatternConverter.new(song, plan, report, variant_phrases, lines_per_row)
   local self = setmetatable({}, PatternConverter)
   self.song = song
   self.plan = plan
   self.variant_phrases = variant_phrases or {}
+  self.lines_per_row = lines_per_row or 1
   self.report_unsupported = function(_, name)
     report(name)
   end
@@ -75,15 +80,13 @@ local GLIDE_UNITS_PER_SEMITONE = 64
 
 -- Instrument vibrato as pattern vibrato 0Vxy on every row once the vibrato delay has run out (an LFO in the
 -- instrument restarts with every sample switch of the phrase).
--- Speed: AHX advances a 64-step sine by `speed` per frame, i.e. the vibrato rate is fixed in Hz. Renoise's 0Vxy
--- rate seems to follow the lines instead of the ticks: x = speed / 2 was right at song speed 3 (xeron - 64k is all
--- you need, AHX 07), but too slow at speed 4 (pink - thanatos remix). So x scales with the song speed:
--- x = speed · song speed / 6.
--- ASSUMPTION: the 0Vxy rate is proportional to x per line.
+-- Speed: AHX advances a 64-step sine by `speed` per frame, i.e. the vibrato rate is fixed in Hz. Renoise's 0Vxy rate
+-- follows the lines (rate ∝ x · lines per second), so x = speed · song speed / (6 · lines per row) (verified by ear:
+-- xeron - 64k is all you need at speed 3 / 1×, pink - thanatos remix at speed 16 / 2×). x is at most F, so slow
+-- songs need a higher pattern resolution (see `Resolution`).
 -- Depth: AHX adds `sine · depth >> 7` to the period, so the depth in semitones depends on the note (high notes have
 -- small periods). It is converted per row at the current note; Renoise depth is semitone-based.
 -- y = depth in 1/8 semitones (verified by ear: xeron - 64k is all you need, syphus - better days).
-local VIBRATO_SPEED_DIVISOR = 6
 local VIBRATO_DEPTH_UNITS_PER_SEMITONE = 8
 
 ---Renoise slide amount (per tick = per AHX frame) for an AHX period slide at a note.
@@ -126,7 +129,7 @@ end
 ---@param cell AhxCell
 ---@param tempo integer
 function PatternConverter:add_tempo(cell, tempo)
-  local lpb, tpl, exact = Timing.for_speed(self.plan, tempo)
+  local lpb, tpl, exact = Timing.for_speed(self.plan, tempo, self.lines_per_row)
   if not exact then
     self:report_unsupported(('speed %d (approximated)'):format(tempo))
   end
@@ -160,7 +163,7 @@ function PatternConverter:convert_step(channel, step, transpose, next_instrument
 
   -- Note delay
   if fx == 0xe and high == 0xd and low > 0 and low < self.tempo then
-    cell.delay = math.min(255, math.floor(low * 256 / self.tempo))
+    cell.delay_frames = low
   end
 
   local instrument = step.instrument
@@ -227,7 +230,7 @@ function PatternConverter:convert_step(channel, step, transpose, next_instrument
           add_effect(cell, '0C', low)
         else
           cell.note_off = true
-          cell.delay = math.min(255, math.floor(low * 256 / self.tempo))
+          cell.delay_frames = low
         end
         state.cut = true
         state.hard_cut = 0
@@ -259,10 +262,9 @@ function PatternConverter:convert_step(channel, step, transpose, next_instrument
   -- instrument (with release when the instrument says so, see `ReleaseWriter`). A delayed note-off does it; on a row
   -- with its own note there is no room for one.
   if state.hard_cut > 0 and next_instrument > 0 then
-    if not cell.note and not cell.note_off and not cell.delay then
-      local start = math.max(0, self.tempo - state.hard_cut)
+    if not cell.note and not cell.note_off and not cell.delay_frames then
       cell.note_off = true
-      cell.delay = math.min(255, math.floor(start * 256 / self.tempo))
+      cell.delay_frames = math.max(0, self.tempo - state.hard_cut)
     end
     state.hard_cut = 0
   end
@@ -309,16 +311,28 @@ function PatternConverter:add_vibrato(cell, state)
   end
 
   local vibrato = state.vibrato
-  -- The replayer starts the vibrato in the first frame after `delay` frames.
-  if vibrato and vibrato.depth > 0 and vibrato.speed > 0 and state.frames + self.tempo > vibrato.delay then
-    local speed = math.floor(bit.band(vibrato.speed, 0x3f) * self.tempo / VIBRATO_SPEED_DIVISOR + 0.5)
+  -- The replayer starts the vibrato in the first frame after `delay` frames. A row spans `lines_per_row` lines; the
+  -- vibrato starts on the first line whose middle lies behind the delay (a whole row at once started it too early with
+  -- a long delay and slow speed: pink - thanatos remix, speed 16, delay 8).
+  local frames_per_line = self.tempo / self.lines_per_row
+  local first_sub = nil
+  if vibrato then
+    for sub = 0, self.lines_per_row - 1 do
+      if state.frames + (sub + 0.5) * frames_per_line > vibrato.delay then
+        first_sub = sub
+        break
+      end
+    end
+  end
+  if vibrato and vibrato.depth > 0 and vibrato.speed > 0 and first_sub then
+    local speed = Resolution.vibrato_speed(vibrato.speed, self.tempo, self.lines_per_row)
     local depth = math.floor(vibrato_semitones(vibrato.depth, state.note) * VIBRATO_DEPTH_UNITS_PER_SEMITONE + 0.5)
     if speed > 15 or depth > 15 then
       self:report_unsupported('vibrato speed/depth above F (clamped)')
     end
     -- Depth 0: the vibrato is too small to hear at this pitch (and 0V with y = 0 may continue the previous depth).
     if depth > 0 then
-      add_effect(cell, '0V', math.min(15, math.max(1, speed)) * 16 + math.min(15, depth))
+      cell.vibrato = { amount = math.min(15, math.max(1, speed)) * 16 + math.min(15, depth), first_sub = first_sub }
     end
   end
   state.frames = state.frames + self.tempo
@@ -332,6 +346,7 @@ local function is_empty(cell)
     and cell.instrument == nil
     and cell.volume == nil
     and cell.delay == nil
+    and cell.delay_frames == nil
     and #cell.effects == 0
 end
 
@@ -372,6 +387,77 @@ function PatternConverter:apply_channel_volumes(cells)
   end
 end
 
+---Merges a cell into the line of a channel (keeps existing values, appends effects).
+---@param lines table<integer, AhxCell>
+---@param line integer
+---@param cell AhxCell
+local function merge(lines, line, cell)
+  local existing = lines[line]
+  if not existing then
+    lines[line] = cell
+    return
+  end
+  for _, field in ipairs({ 'note', 'note_off', 'instrument', 'volume', 'delay' }) do
+    if existing[field] == nil then
+      existing[field] = cell[field]
+    end
+  end
+  for _, effect in ipairs(cell.effects) do
+    existing.effects[#existing.effects + 1] = effect
+  end
+end
+
+---Places the cell of one row on its pattern lines. A row spans `lines_per_row` lines: delayed events (note delay,
+---note cut, hard cut) go to the sub line of their frame with the remaining fraction in the delay column, and the
+---vibrato command is repeated on every line of the row.
+---@param lines table<integer, AhxCell>
+---@param line integer first line of the row
+---@param cell AhxCell
+function PatternConverter:place(lines, line, cell)
+  local per_row = self.lines_per_row
+  local frames = cell.delay_frames
+  cell.delay_frames = nil
+
+  if frames then
+    local position = frames * per_row / self.tempo
+    local sub = math.floor(position)
+    local delay = math.min(255, math.floor((position - sub) * 256))
+    if cell.note_off then
+      -- The note-off gets a cell of its own on its sub line; the row's effects stay on the first line.
+      cell.note_off = nil
+      if sub == 0 then
+        cell.note_off = true
+        cell.delay = delay
+      else
+        merge(lines, line + sub, { note_off = true, delay = delay, effects = {} })
+      end
+    elseif sub == 0 then
+      cell.delay = delay
+    else
+      -- Note delay: the whole step moves (the replayer processes the step only after the delay).
+      cell.delay = delay
+      merge(lines, line + sub, cell)
+      cell = { effects = {} }
+    end
+  end
+
+  local vibrato = cell.vibrato
+  cell.vibrato = nil
+  if vibrato then
+    for sub = vibrato.first_sub, per_row - 1 do
+      if sub == 0 then
+        add_effect(cell, '0V', vibrato.amount)
+      else
+        merge(lines, line + sub, { effects = { { number = '0V', amount = vibrato.amount } } })
+      end
+    end
+  end
+
+  if not is_empty(cell) then
+    merge(lines, line, cell)
+  end
+end
+
 ---Converts one segment into pattern data.
 ---@param segment AhxSegment
 ---@return AhxPatternData
@@ -380,7 +466,7 @@ function PatternConverter:convert(segment)
   local position = song.positions[segment.position]
   local data = {
     segment = segment,
-    number_of_lines = segment.last_row - segment.first_row + 1,
+    number_of_lines = (segment.last_row - segment.first_row + 1) * self.lines_per_row,
     channels = { {}, {}, {}, {} },
     effect_columns = 0,
     uses_delay = false,
@@ -390,7 +476,7 @@ function PatternConverter:convert(segment)
   local next_position = song.positions[(segment.position + 1) % song.position_count]
 
   for row = segment.first_row, segment.last_row do
-    local line = row - segment.first_row + 1
+    local line = (row - segment.first_row) * self.lines_per_row + 1
     -- The replayer processes the steps of all four voices before the frames of the row, so a speed command in any
     -- channel already applies to the frame timing (note delay, note cut, hard cut, slides) of all channels of this
     -- row (mobby - good day: swing via F05/F0A on AHX 2, hard cut bass on AHX 1).
@@ -415,9 +501,14 @@ function PatternConverter:convert(segment)
     self:apply_channel_volumes(cells)
 
     for channel = 1, 4 do
-      local cell = cells[channel]
-      if not is_empty(cell) then
-        data.channels[channel][line] = cell
+      self:place(data.channels[channel], line, cells[channel])
+    end
+  end
+
+  for channel = 1, 4 do
+    for line = 1, data.number_of_lines do
+      local cell = data.channels[channel][line]
+      if cell then
         data.effect_columns = math.max(data.effect_columns, #cell.effects)
         data.uses_delay = data.uses_delay or cell.delay ~= nil
         key_parts[#key_parts + 1] = ('%d:%d=%s'):format(line, channel, cell_key(cell))

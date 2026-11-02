@@ -84,12 +84,13 @@ become patterns and the pattern sequence.
   - `phrase_builder.lua` – neutral phrase data from a simulation for one triggered note: one line per frame, only
     changes written, phase-continuous sample offsets.
   - `filter_path.lua` – Renoise-filter path decision and AHX cutoff per frame.
+  - `resolution.lua` – automatic pattern resolution and the 0Vxy vibrato speed.
   - `note_usage.lua` – the notes each instrument is triggered with (one phrase per note) and its 9xx note/offset
     variants.
 - `importer/` – everything that touches the Renoise API:
   - `controller.lua` – workflow: parse → `ui/options_dialog.lua` → `song_creator.lua` (new song without template) →
     `process_slicer.lua` (sliced build with progress dialog, ported from SongMerger) → summary.
-  - `preferences.lua` – import options (interpolation, bit depth, sample rate, filter resonance) in the tool's `preferences.xml`.
+  - `preferences.lua` – import options (interpolation, bit depth, sample rate, filter resonance, pattern resolution) in the tool's `preferences.xml`.
   - `ui/widgets.lua` – shared dialog look (ported from SongMerger), `ui/options_dialog.lua` – import options.
   - `song_setup.lua` – four sequencer tracks (LRRL panning), no send/group tracks, Maximizer on the master, one
     instrument, one sequence slot.
@@ -148,10 +149,13 @@ become patterns and the pattern sequence.
 - A phrase must keep running to keep its volume: after a one-shot phrase ends, the sample plays on at the pattern
   volume (observed in Renoise: loud noise after the snare of pink - sometimes). Steady states therefore end with a
   note-off when silent, or become a two-line loop when audible.
-- Instrument vibrato: pattern vibrato 0Vxy on every row after the vibrato delay until the next trigger
-  (x = speed · song speed / 6 because the 0Vxy rate seems to follow lines (under test), y = depth converted to semitones at the current note in 1/8 semitones; E4x supported; verified by
-  ear). An instrument LFO does not work: it restarts with every sample switch of the phrase (PWM) and never passes
-  its delay (observed), so the LFO code was removed.
+- Instrument vibrato: pattern vibrato 0Vxy on every line after the vibrato delay until the next trigger (it starts
+  on the first line whose middle lies behind the delay; a whole row at once was too early in thanatos).
+  x = vibrato speed · song speed / (6 · lines per row) (Renoise's vibrato rate follows the lines; verified by ear:
+  xeron - 64k is all you need at speed 3 / 1×, pink - thanatos remix at speed 16 / 2×), y = depth in 1/8 semitones at
+  the current note; E4x supported. x above F is clamped and reported (that was why thanatos sounded too slow at 1×:
+  x = 24). Rejected: an instrument LFO (restarts with every sample switch) and baking the vibrato into the phrase via
+  fine tune samples (too many sample switches).
 - Every phrase note line (also 0GFF glides) carries its volume: a note with an empty volume column plays at full
   volume, so the envelope would be lost on every retrigger or glide.
 - Hard cut (instrument hard cut frames): like the replayer, the note ends that many frames before the next row of
@@ -169,7 +173,12 @@ become patterns and the pattern sequence.
 - Every import starts with the options dialog: sample interpolation (none / linear / cubic / sinc, default none) and
   sample resolution (8 / 16 / 32 bit, default 8) and sample rate (8363 / 16726 / 33452 Hz = 1× / 2× / 4×, default
   1×; higher rates repeat every frame, so waveform, pitch and 0Sxx offsets stay the same).
-  Filter resonance slider 0..0.3 (default 0.2) for the Renoise-filter path. The dialog starts with the saved options; Import uses the current
+  Filter resonance slider 0..0.3 (default 0.2) for the Renoise-filter path.
+  Pattern resolution Auto / 1× / 2× / 4× pattern lines per AHX row (default Auto = the smallest resolution at which
+  no vibrato needs 0Vxy speed above F, `ahx/resolution.lua`): LPB × factor, TPL / factor (a tick stays
+  a frame when the speed is divisible, otherwise approximated and reported), note delay / note cut / hard cut go to
+  the sub line of their frame, 0Vxy is repeated on every line; reduced when a pattern would exceed 512 lines.
+  Observed: the 0Vxy rate follows the line rate (rate ∝ x · lines per second); x is clamped at F. The dialog starts with the saved options; Import uses the current
   choice, Save stores it (while the choice equals the saved options, the Save button shows "✔ Save" (bold) and is disabled).
 - Volume: the phrase's volume column carries envelope · performance volume (0..64 → 0..0x80) and overwrites the
   pattern's note volume on every phrase note line. The AHX note volume (instrument volume, Cxx, EAx/EBx, volume

@@ -37,6 +37,14 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
   for index, value in ipairs(Preferences.BIT_DEPTHS) do
     bit_depth_labels[index] = ('%d bit'):format(value)
   end
+  local resolution_labels = {}
+  for index, value in ipairs(Preferences.LINES_PER_ROW) do
+    if value == 0 then
+      resolution_labels[index] = 'Auto (fits the vibrato)'
+    else
+      resolution_labels[index] = ('%d× (%d line%s per row)'):format(value, value, value == 1 and '' or 's')
+    end
+  end
   local sample_rate_labels = {}
   for index, value in ipairs(Preferences.SAMPLE_RATE_FACTORS) do
     sample_rate_labels[index] = ('%d Hz (%d×)'):format(BASE_SAMPLE_RATE * value, value)
@@ -65,6 +73,7 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
       bit_depth = options.bit_depth,
       sample_rate_factor = options.sample_rate_factor,
       filter_resonance = options.filter_resonance,
+      lines_per_row = options.lines_per_row,
     })
   end
 
@@ -118,6 +127,25 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
       ),
       vb:text {
         text = 'None keeps the hard, aliased sound of the Amiga.',
+        style = 'disabled',
+      },
+    }, CONTENT_WIDTH),
+    Widgets.section(vb, 'Patterns', {
+      Widgets.labeled(
+        vb,
+        'Resolution',
+        vb:popup {
+          width = POPUP_WIDTH,
+          items = resolution_labels,
+          value = index_of(Preferences.LINES_PER_ROW, options.lines_per_row),
+          notifier = function(value)
+            options.lines_per_row = Preferences.LINES_PER_ROW[value]
+            update_saved_mark()
+          end,
+        }
+      ),
+      vb:text {
+        text = 'Pattern lines per AHX row. Slow songs need more lines for fast vibratos.',
         style = 'disabled',
       },
     }, CONTENT_WIDTH),

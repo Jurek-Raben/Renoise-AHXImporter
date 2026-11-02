@@ -92,16 +92,21 @@ function Timing.plan(song)
   return { bpm = best.bpm, phrase_lpb = best.phrase_lpb, speed_multiplier = multiplier, exact = true }
 end
 
----Song LPB and TPL for a speed.
+---Song LPB and TPL for a speed. With `lines_per_row` > 1 one AHX row spans several pattern lines (pattern
+---resolution option): LPB is multiplied and TPL divided, so a tick stays one frame when the speed is divisible.
 ---@param plan AhxTimingPlan
 ---@param speed integer 1..255
+---@param lines_per_row integer|nil 1, 2 or 4 (default 1)
 ---@return integer lpb
 ---@return integer tpl
 ---@return boolean exact
-function Timing.for_speed(plan, speed)
-  local lpb = plan.phrase_lpb / speed
-  local rounded = math.max(1, math.min(255, math.floor(lpb + 0.5)))
-  return rounded, math.max(1, math.min(speed, MAX_TPL)), rounded == lpb and speed <= MAX_TPL
+function Timing.for_speed(plan, speed, lines_per_row)
+  lines_per_row = lines_per_row or 1
+  local lpb = plan.phrase_lpb * lines_per_row / speed
+  local rounded_lpb = math.max(1, math.min(255, math.floor(lpb + 0.5)))
+  local tpl = speed / lines_per_row
+  local rounded_tpl = math.max(1, math.min(MAX_TPL, math.floor(tpl + 0.5)))
+  return rounded_lpb, rounded_tpl, rounded_lpb == lpb and rounded_tpl == tpl
 end
 
 Timing.INITIAL_SPEED = INITIAL_SPEED

@@ -2,6 +2,7 @@
 -- sliced with a progress dialog.
 
 local Parser = require('ahx.parser')
+local Resolution = require('ahx.resolution')
 local Timing = require('ahx.timing')
 local InstrumentWriter = require('importer.instrument_writer')
 local PatternWriter = require('importer.pattern_writer')
@@ -37,7 +38,18 @@ local function build_song(song, file_name, options)
     report('speed combination (rows approximated)')
   end
   local variant_phrases = InstrumentWriter.write_all(song, plan, report, options)
-  local summary = PatternWriter.write_song(song, 0, plan, report, variant_phrases)
+  local lines_per_row = options.lines_per_row
+  if lines_per_row == 0 then
+    local highest_x
+    lines_per_row, highest_x = Resolution.auto(song, 0)
+    Util.log('Pattern resolution auto: %d× (highest vibrato speed at 1×: %.1f)', lines_per_row, highest_x)
+  end
+  -- A Renoise pattern has at most 512 lines.
+  while lines_per_row > 1 and song.track_length * lines_per_row > 512 do
+    lines_per_row = lines_per_row / 2
+    report('pattern resolution reduced (more than 512 lines per pattern)')
+  end
+  local summary = PatternWriter.write_song(song, 0, plan, report, variant_phrases, lines_per_row)
   summary.unsupported = unsupported
 
   rns.selected_instrument_index = 1
