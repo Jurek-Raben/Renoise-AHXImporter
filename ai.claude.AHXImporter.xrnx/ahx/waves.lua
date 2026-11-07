@@ -21,6 +21,8 @@ Waves.SQUARE = 2
 Waves.NOISE = 3
 
 Waves.UNFILTERED_SET = 31
+-- Pulse width index of a square position outside of the square table (silent, see `Waves.square_width_of`).
+Waves.SQUARE_OUT_OF_RANGE = -1
 
 local NOISE_LENGTH = 0x280 * 3
 local SQUARE_BLOCK = 0x80
@@ -222,6 +224,10 @@ function Waves.filter_set_of(filter_pos)
 end
 
 ---Effective pulse width index of a square position, as the replayer folds it (0..31; positions 0 and 1 are equal).
+---The position can run away from the square limits: a performance list 3xx while the voice is still sliding in makes
+---it miss the turn at the limit (sixty4-funk: up to 543 within one note). The replayer then reads outside of the square
+---table: the reference engine gets undefined values, i.e. silence. All of these positions are one silent state here
+---(`SQUARE_OUT_OF_RANGE`), otherwise each of them would count as a pulse width of its own and need a sample.
 ---@param square_pos integer voice square position (already shifted by the wave length)
 ---@param wave_length integer 0..5
 ---@return integer
@@ -229,6 +235,9 @@ function Waves.square_width_of(square_pos, wave_length)
   local x = bit.lshift(square_pos, 5 - wave_length)
   if x > 0x20 then
     x = 0x40 - x
+  end
+  if x < 0 then
+    return Waves.SQUARE_OUT_OF_RANGE
   end
   if x > 0 then
     x = x - 1
@@ -250,11 +259,12 @@ function Waves.cycle(waveform, filter_pos, wave_length, square_pos)
 
   if waveform == Waves.SQUARE then
     local cycle = {}
-    local offset = Waves.square_width_of(square_pos, wave_length) * SQUARE_BLOCK
+    local width = Waves.square_width_of(square_pos, wave_length)
+    local offset = width * SQUARE_BLOCK
     local delta = bit.rshift(32, wave_length)
     local length = bit.lshift(1, wave_length) * 4
     for i = 1, length do
-      cycle[i] = set.squares[offset + 1]
+      cycle[i] = width == Waves.SQUARE_OUT_OF_RANGE and 0 or set.squares[offset + 1]
       offset = offset + delta
     end
     return cycle
