@@ -7,7 +7,7 @@
 --
 -- The AHX filter is a state variable filter run over the waveform data at the playback rate of the voice
 -- (`AHXWaves.filter`), so its cutoff follows the pitch: with the coefficient f = (8 + 3 · step) · 1.25 / 100 of a
--- filter set, the cutoff is fc = fs · asin(f / 2) / π, fs = 3579545.25 / period.
+-- filter set, the cutoff is fc = fs · asin(f / 2) / π, fs = Paula clock of the tuning / period.
 
 local NoteUsage = require('ahx.note_usage')
 local Tables = require('ahx.tables')
@@ -70,14 +70,16 @@ end
 ---@param simulation AhxSimulation
 ---@param side 'low'|'high'
 ---@param trigger_note integer Renoise note
+---@param tuning integer index into `Tables.TUNINGS`
 ---@return AhxCutoffEnvelope
-function FilterPath.envelope(simulation, side, trigger_note)
+function FilterPath.envelope(simulation, side, trigger_note, tuning)
   local result = { cutoffs = {} }
+  local clock = Tables.TUNINGS[tuning].clock
   local track_ahx_note = trigger_note - NoteUsage.NOTE_OFFSET
   for index, frame in ipairs(simulation.frames) do
     local ahx_note = frame.fixed and frame.instr_period or frame.instr_period + track_ahx_note - 1
     local period = clamp(Tables.PERIODS[clamp(ahx_note, 0, 60)] + frame.perf_slide_period, MIN_PERIOD, MAX_PERIOD)
-    local sample_rate = Tables.PAULA_CLOCK / period
+    local sample_rate = clock / period
 
     local set = Waves.filter_set_of(frame.filter_pos)
     local step = nil

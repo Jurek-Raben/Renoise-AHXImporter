@@ -45,25 +45,46 @@ function Widgets.header(vb, title, subtitle)
   return column
 end
 
+local SECTION_MARGIN = 6
+
 ---Framed section with a bold title.
 ---@param vb renoise.ViewBuilder
 ---@param title string|nil
 ---@param views renoise.Views.View[]
----@param width integer|string|nil
-function Widgets.section(vb, title, views, width)
+---@param group table[]|nil collects the section for `Widgets.equalize_sections` (needs a title)
+function Widgets.section(vb, title, views, group)
   local column = vb:column {
     background = 'group',
-    margin = 6,
+    margin = SECTION_MARGIN,
     spacing = 4,
-    width = width,
   }
   if title then
-    column:add_child(vb:text { text = title, font = 'bold' })
+    local title_view = vb:text { text = title, font = 'bold' }
+    column:add_child(title_view)
+    if group then
+      group[#group + 1] = { column = column, title_view = title_view }
+    end
   end
   for _, view in ipairs(views) do
     column:add_child(view)
   end
   return column
+end
+
+---Gives all sections of a group the width of the widest one. A column fits itself to its children, so its own width
+---does not last; the title stretched to the full inner width does, also when the visibility of a child changes.
+---ASSUMPTION: the width of a column is already up to date before the dialog is shown.
+---@param group table[] filled by `Widgets.section`
+---@return integer width of the sections
+function Widgets.equalize_sections(group)
+  local widest = 0
+  for _, section in ipairs(group) do
+    widest = math.max(widest, section.column.width)
+  end
+  for _, section in ipairs(group) do
+    section.title_view.width = widest - 2 * SECTION_MARGIN
+  end
+  return widest
 end
 
 ---Label/value line.

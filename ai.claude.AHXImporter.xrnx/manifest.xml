@@ -2,7 +2,7 @@
 <RenoiseScriptingTool doc_version="0">
   <ApiVersion>6.2</ApiVersion>
   <Id>ai.claude.AHXImporter</Id>
-  <Version>0.4.1</Version>
+  <Version>0.4.2</Version>
   <Author>Jurek Raben</Author>
   <Name>AHX Importer</Name>
   <Category>Import</Category>

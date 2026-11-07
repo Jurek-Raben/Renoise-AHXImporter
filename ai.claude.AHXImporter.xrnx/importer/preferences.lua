@@ -2,6 +2,7 @@
 -- Renoise would then write it back on its own (e.g. when the tool unloads). The file is read once here and written
 -- only by `Preferences.save` (the options dialog's Save button).
 
+local Tables = require('ahx.tables')
 local Util = require('importer.util')
 
 local Preferences = {}
@@ -33,6 +34,8 @@ local document = renoise.Document.create('AHXImporterPreferences') {
   crossfade_ms = Preferences.DEFAULT_CROSSFADE_MS,
   band_limit_roll_off = Preferences.DEFAULT_ROLL_OFF,
   fill_notes = true,
+  -- Index into Tables.TUNINGS.
+  tuning = Tables.DEFAULT_TUNING,
 }
 
 -- ASSUMPTION: bundle_path ends with a path separator (handled either way).
@@ -55,7 +58,8 @@ end
 ---@field interpolation integer renoise.Sample.INTERPOLATE_* (1..4)
 ---@field oversample boolean sample option "Oversample"
 ---@field bit_depth integer 8, 16 or 32
----@field sample_rate_factor integer 1, 2 or 4 (multiple of the base rate 8363 Hz)
+---@field sample_rate_factor integer 1, 2 or 4 (multiple of the base rate of the tuning)
+---@field tuning integer index into `Tables.TUNINGS`
 ---@field rendering integer 1 = original, 2 = smoothed, 3 = band-limited (see Preferences.RENDERINGS)
 ---@field lines_per_row integer 0 (auto), 1, 2 or 4 pattern lines per AHX row (pattern resolution)
 ---@field band_limit_roll_off number 0..1 share of the harmonics that fades out in band-limited rendering
@@ -78,6 +82,7 @@ function Preferences.load()
     crossfade_ms = document.crossfade_ms.value,
     band_limit_roll_off = document.band_limit_roll_off.value,
     fill_notes = document.fill_notes.value,
+    tuning = document.tuning.value,
   }
 end
 
@@ -94,6 +99,7 @@ function Preferences.save(options)
   document.crossfade_ms.value = options.crossfade_ms
   document.band_limit_roll_off.value = options.band_limit_roll_off
   document.fill_notes.value = options.fill_notes
+  document.tuning.value = options.tuning
   local ok, error_message = document:save_as(FILE_NAME)
   if not ok then
     Util.log('could not save %s: %s', FILE_NAME, tostring(error_message))
@@ -114,6 +120,7 @@ function Preferences.is_saved(options)
       and saved.crossfade_ms == options.crossfade_ms
       and math.abs(saved.band_limit_roll_off - options.band_limit_roll_off) < 0.005
       and saved.fill_notes == options.fill_notes
+      and saved.tuning == options.tuning
 end
 
 return Preferences

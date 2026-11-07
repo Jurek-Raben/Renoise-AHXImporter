@@ -3,8 +3,23 @@
 
 local Tables = {}
 
--- NTSC Paula clock as used by the reference replayer (`3579545.25 / period` = playback rate in Hz).
-Tables.PAULA_CLOCK = 3579545.25
+---@class AhxTuning
+---@field name string
+---@field clock number Paula clock in Hz (`clock / period` = playback rate of a period)
+---@field sample_rate integer rate of a sample at its base note C-4 (= clock / 428, rounded; period 428 = C-4)
+---@field tempered boolean notes sit exactly on the Renoise note instead of following the period table's tuning
+
+-- ASSUMPTION: create_sample_data accepts these non-standard rates and their multiples (verified for 8363 Hz only).
+-- Deviation from the reference replayer: it uses the NTSC clock (3579545.25 Hz); the default here is the PAL clock.
+-- 440 Hz: A-4 = 440 Hz makes C-4 261.6256 Hz, and a 32-frame cycle plays at the note it is written at: 261.6256 * 32 =
+-- 8372 Hz. The integer periods of the table are up to 4 cents off the tempered scale, so this tuning also ignores
+-- their tuning (see `tempered`).
+---@type AhxTuning[]
+Tables.TUNINGS = {
+  { name = 'Amiga PAL', clock = 3546895, sample_rate = 8287, tempered = false },
+  { name = '440 Hz', clock = 8372 * 428, sample_rate = 8372, tempered = true },
+}
+Tables.DEFAULT_TUNING = 1
 
 -- Length of the sample buffers written for waveform cycles (the cycle repeated). See `Waves.voice_buffer`.
 Tables.SAMPLE_BUFFER_LENGTH = 256

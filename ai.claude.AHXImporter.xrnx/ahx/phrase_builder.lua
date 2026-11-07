@@ -21,8 +21,7 @@ local PhraseBuilder = {}
 -- Phrases have at most 512 lines.
 local MAX_LINES = 512
 
--- Sample rate at base note C-4, see `SampleWriter`.
-local SAMPLE_RATE = 8363
+-- Base note of the samples, see `SampleWriter`.
 local BASE_NOTE = 48
 
 -- Pitch change from one frame to the next that counts as a jump (arpeggio) instead of a slide step.
@@ -64,9 +63,15 @@ local REFERENCE_NOTE = 36
 ---Exact Renoise pitch (fractional note) of an AHX note plus a period offset, clamped like the replayer.
 ---@param ahx_note integer
 ---@param period_offset integer
+---@param tempered boolean the note sits exactly on its Renoise note, a period offset (slide) is relative to that
 ---@return number
-local function exact_pitch(ahx_note, period_offset)
-  local period = clamp(Tables.PERIODS[clamp(ahx_note, 0, 60)] + period_offset, MIN_PERIOD, MAX_PERIOD)
+local function exact_pitch(ahx_note, period_offset, tempered)
+  local note = clamp(ahx_note, 0, 60)
+  local note_period = Tables.PERIODS[note]
+  local period = clamp(note_period + period_offset, MIN_PERIOD, MAX_PERIOD)
+  if tempered and note_period > 0 then
+    return note + NoteUsage.NOTE_OFFSET + 12 * math.log(note_period / period) / math.log(2)
+  end
   return REFERENCE_NOTE + 12 * math.log(REFERENCE_PERIOD / period) / math.log(2)
 end
 
@@ -122,6 +127,7 @@ end
 ---@param trigger_note integer Renoise note the phrase plays
 ---@param frames_per_second number `Timing.frames_per_second`
 ---@param fine_steps integer fine tune steps per semitone (1 = semitones only)
+---@param tuning integer index into `Tables.TUNINGS`
 ---@param slides integer[]|nil track portamento period per frame from the trigger on (the last value holds)
 ---@return AhxPhraseData
 function PhraseBuilder.build(
@@ -131,9 +137,12 @@ function PhraseBuilder.build(
   trigger_note,
   frames_per_second,
   fine_steps,
+  tuning,
   slides
 )
   slides = slides or {}
+  local tempered = Tables.TUNINGS[tuning].tempered
+  local sample_rate = Tables.TUNINGS[tuning].sample_rate
   local frames, loop_start, loop_end, note_off = unrolled_frames(simulation, #slides)
   local data = {
     note = trigger_note,
@@ -166,7 +175,7 @@ function PhraseBuilder.build(
     if not frame.fixed and #slides > 0 then
       slide = slides[math.min(index, #slides)]
     end
-    local pitch = clamp(exact_pitch(ahx_note, frame.perf_slide_period + slide), 0, 119)
+    local pitch = clamp(exact_pitch(ahx_note, frame.perf_slide_period + slide, tempered), 0, 119)
     pitch = math.floor(pitch * fine_steps + 0.5) / fine_steps
     -- Unrolled frames repeat the simulated loop, so their state index is the one of the simulated frame.
     local simulated_index = index
@@ -246,7 +255,7 @@ function PhraseBuilder.build(
       data.lines[index] = line
     end
 
-    local rate = SAMPLE_RATE * 2 ^ ((pitches[index] - BASE_NOTE) / 12)
+    local rate = sample_rate * 2 ^ ((pitches[index] - BASE_NOTE) / 12)
     position = (position + rate / frames_per_second) % Tables.SAMPLE_BUFFER_LENGTH
   end
 

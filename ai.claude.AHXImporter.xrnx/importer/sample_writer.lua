@@ -5,10 +5,8 @@ local Tables = require('ahx.tables')
 
 local SampleWriter = {}
 
--- Rate at which a sample plays at its base note C-4. AHX note C-3 plays at 3579545.25 / 856 ≈ 4181.7 Hz (NTSC Paula),
--- AHX note n maps to Renoise note n + 11, so C-4 is one octave above: ≈ 8363.4 Hz.
--- create_sample_data accepts this non-standard rate (verified).
-local SAMPLE_RATE = 8363
+-- A sample plays at the rate of its tuning (`Tables.TUNINGS`) at its base note C-4. With PAL Paula, AHX note C-3 plays
+-- at 3546895 / 856 ≈ 4143.6 Hz, AHX note n maps to Renoise note n + 11, so C-4 is one octave above: ≈ 8287.1 Hz.
 local BASE_NOTE = 48
 
 ---Loop, interpolation and playback properties shared by all renderings.
@@ -66,8 +64,9 @@ function SampleWriter.write(sample, frames, name, options)
     factor = math.max(factor, SMOOTHED_MIN_FACTOR)
   end
   local frame_count = #frames * factor
+  local sample_rate = Tables.TUNINGS[options.tuning].sample_rate
 
-  if not buffer:create_sample_data(SAMPLE_RATE * factor, options.bit_depth, 1, frame_count) then
+  if not buffer:create_sample_data(sample_rate * factor, options.bit_depth, 1, frame_count) then
     error('Out of memory while creating sample "' .. name .. '"')
   end
 
@@ -99,11 +98,12 @@ function SampleWriter.write_band_limited(sample, cycle, top_pitch, name, options
   local factor = math.max(options.sample_rate_factor, SMOOTHED_MIN_FACTOR)
   local cycle_length = #cycle
   local cycles = Tables.SAMPLE_BUFFER_LENGTH / cycle_length
-  local cycle_frequency = SAMPLE_RATE * 2 ^ ((top_pitch - BASE_NOTE) / 12) / cycle_length
+  local sample_rate = Tables.TUNINGS[options.tuning].sample_rate
+  local cycle_frequency = sample_rate * 2 ^ ((top_pitch - BASE_NOTE) / 12) / cycle_length
   local frames = BandLimit.render(cycle, cycle_frequency, cycle_length * factor, cycles, options.band_limit_roll_off)
   local frame_count = #frames
 
-  if not buffer:create_sample_data(SAMPLE_RATE * factor, options.bit_depth, 1, frame_count) then
+  if not buffer:create_sample_data(sample_rate * factor, options.bit_depth, 1, frame_count) then
     error('Out of memory while creating sample "' .. name .. '"')
   end
   buffer:prepare_sample_data_changes(false)

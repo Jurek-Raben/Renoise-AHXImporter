@@ -2,13 +2,13 @@
 -- choice (the Save button shows a check mark while the choice equals the saved options). Return imports, Esc cancels.
 -- The target BPM starts with the song's own BPM and only applies to this import, so Save ignores it.
 
+local Tables = require('ahx.tables')
 local Timing = require('ahx.timing')
 local Preferences = require('importer.preferences')
 local Widgets = require('importer.ui.widgets')
 
 local OptionsDialog = {}
 
-local CONTENT_WIDTH = 320
 local POPUP_WIDTH = 160
 
 ---@param ms integer
@@ -30,8 +30,11 @@ local TOOLTIPS = {
     .. 'harmonics without aliasing at the played pitch.',
   roll_off = 'Band-limited only: share of the harmonics that fades out softly. 0 % cuts hard (can ring like a '
     .. 'steep resonant filter), higher values sound softer.',
-  sample_rate = 'Sample rate of the created samples (multiple of the Amiga rate of C-4). Higher rates give the '
-    .. 'smoothing room; pitch and timing stay the same.',
+  sample_rate = 'Sample rate of the created samples (multiple of the rate of C-4 in the chosen tuning). Higher rates '
+    .. 'give the smoothing room; pitch and timing stay the same.',
+  tuning = 'Pitch of the instruments. Amiga PAL: the pitch of a PAL Amiga including the small deviations of its note '
+    .. 'table (about 14 to 18 cents below 440 Hz). 440 Hz: every note exactly in tune with A-4 = 440 Hz, to play '
+    .. 'along with other Renoise instruments. The tempo stays the same.',
   crossfade = 'Crossfade of the sample switches inside a phrase (pulse width modulation, filter steps). Smooths the '
     .. 'rough, ring-modulation-like sound of fast switches. 0 = off. The note start is never faded in.',
   resolution = "Pattern lines per AHX row. Renoise's vibrato speed follows the lines, so slow songs need more lines "
@@ -49,9 +52,6 @@ local TOOLTIPS = {
 
 -- Index of the band-limited rendering in Preferences.RENDERINGS.
 local BAND_LIMITED = 3
-
--- Base sample rate of the samples, see `SampleWriter`.
-local BASE_SAMPLE_RATE = 8363
 
 ---@param values integer[]
 ---@param wanted integer
@@ -74,6 +74,7 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
   local options = Preferences.load()
   local song_bpm = Timing.plan(song).bpm
   local target_bpm = song_bpm
+  local sections = {}
   local close
 
   local bit_depth_labels = {}
@@ -88,9 +89,18 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
       resolution_labels[index] = ('%d× (%d line%s per row)'):format(value, value, value == 1 and '' or 's')
     end
   end
-  local sample_rate_labels = {}
-  for index, value in ipairs(Preferences.SAMPLE_RATE_FACTORS) do
-    sample_rate_labels[index] = ('%d Hz (%d×)'):format(BASE_SAMPLE_RATE * value, value)
+  local tuning_labels = {}
+  for index, tuning in ipairs(Tables.TUNINGS) do
+    tuning_labels[index] = tuning.name
+  end
+
+  ---@return string[]
+  local function sample_rate_labels()
+    local labels = {}
+    for index, value in ipairs(Preferences.SAMPLE_RATE_FACTORS) do
+      labels[index] = ('%d Hz (%d×)'):format(Tables.TUNINGS[options.tuning].sample_rate * value, value)
+    end
+    return labels
   end
 
   local function update_saved_mark()
@@ -132,6 +142,7 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
       crossfade_ms = options.crossfade_ms,
       band_limit_roll_off = options.band_limit_roll_off,
       fill_notes = options.fill_notes,
+      tuning = options.tuning,
       target_bpm = target_bpm,
     })
   end
@@ -239,8 +250,9 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
         vb,
         'Sample rate',
         vb:popup {
+          id = 'sample_rate_popup',
           width = POPUP_WIDTH,
-          items = sample_rate_labels,
+          items = sample_rate_labels(),
           tooltip = TOOLTIPS.sample_rate,
           value = index_of(Preferences.SAMPLE_RATE_FACTORS, options.sample_rate_factor),
           notifier = function(value)
@@ -274,8 +286,24 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
           },
         }
       ),
-    }, CONTENT_WIDTH),
+    }, sections),
     Widgets.section(vb, 'Instruments', {
+      Widgets.labeled(
+        vb,
+        'Tuning',
+        vb:popup {
+          width = POPUP_WIDTH,
+          items = tuning_labels,
+          tooltip = TOOLTIPS.tuning,
+          value = options.tuning,
+          notifier = function(value)
+            options.tuning = value
+            -- ASSUMPTION: changing the items of a popup keeps its selected index.
+            vb.views.sample_rate_popup.items = sample_rate_labels()
+            update_saved_mark()
+          end,
+        }
+      ),
       Widgets.labeled(
         vb,
         'Fill up',
@@ -291,7 +319,7 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
           vb:text { text = 'with playable notes', style = 'disabled' },
         }
       ),
-    }, CONTENT_WIDTH),
+    }, sections),
     Widgets.section(vb, 'Patterns', {
       Widgets.labeled(
         vb,
@@ -338,7 +366,7 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
         text = 'Pattern lines per AHX row. Slow songs need more lines for fast vibratos.',
         style = 'disabled',
       },
-    }, CONTENT_WIDTH),
+    }, sections),
     Widgets.section(vb, 'Filter', {
       Widgets.labeled(
         vb,
@@ -365,24 +393,30 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
         text = 'For filter sweeps played by the Renoise filter.',
         style = 'disabled',
       },
-    }, CONTENT_WIDTH),
-    Widgets.footer(vb, {
-      Widgets.button(vb, {
-        id = 'save_button',
-        text = 'Save',
-        tooltip = 'Save these options as default (a check mark shows they are saved)',
-        notifier = function()
-          Preferences.save(options)
-          update_saved_mark()
-        end,
-      }),
-      Widgets.button(vb, { text = 'Cancel', tooltip = 'Esc', notifier = cancel }),
-      Widgets.button(vb, { text = 'Import', kind = 'primary', tooltip = 'Return', notifier = import }),
-    }),
+    }, sections),
   }
+  local footer = Widgets.footer(vb, {
+    Widgets.button(vb, {
+      id = 'save_button',
+      text = 'Save',
+      tooltip = 'Save these options as default (a check mark shows they are saved)',
+      notifier = function()
+        Preferences.save(options)
+        update_saved_mark()
+      end,
+    }),
+    Widgets.button(vb, { text = 'Cancel', tooltip = 'Esc', notifier = cancel }),
+    Widgets.button(vb, { text = 'Import', kind = 'primary', tooltip = 'Return', notifier = import }),
+  })
+  content:add_child(footer)
 
   update_saved_mark()
   update_roll_off()
+  -- The dialog keeps the width it had before update_roll_off hid the wide row, so it is set to the sections' width.
+  -- ASSUMPTION: the width of the content column set here lasts until the dialog is shown.
+  local width = Widgets.equalize_sections(sections)
+  footer.width = width
+  content.width = width + 2 * Widgets.MARGIN
   close = Widgets.show_dialog('Import Options', content, { ['return'] = import, esc = cancel }, on_cancel)
 end
 

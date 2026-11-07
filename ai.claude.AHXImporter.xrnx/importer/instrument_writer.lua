@@ -75,12 +75,13 @@ end
 ---@param usage AhxInstrumentUsage
 ---@param frames_per_second number
 ---@param fine_steps integer
+---@param tuning integer index into `Tables.TUNINGS`
 ---@return AhxPhraseData[] phrases
 ---@return { data: AhxPhraseData, variant: AhxNoteVariant }[] variants
-local function build_phrases(simulations, state_set, simulation_by_offset, usage, frames_per_second, fine_steps)
+local function build_phrases(simulations, state_set, simulation_by_offset, usage, frames_per_second, fine_steps, tuning)
   local phrases = {}
   for index, note in ipairs(usage.notes) do
-    phrases[index] = PhraseBuilder.build(simulations[1], state_set, 1, note, frames_per_second, fine_steps)
+    phrases[index] = PhraseBuilder.build(simulations[1], state_set, 1, note, frames_per_second, fine_steps, tuning)
     phrases[index].simulation_index = 1
     ProcessSlicer.step()
   end
@@ -96,6 +97,7 @@ local function build_phrases(simulations, state_set, simulation_by_offset, usage
         variant.note,
         frames_per_second,
         fine_steps,
+        tuning,
         variant.slides
       ),
       variant = variant,
@@ -258,8 +260,19 @@ end
 ---@param center_note integer
 ---@param frames_per_second number
 ---@param fine_steps integer
+---@param tuning integer index into `Tables.TUNINGS`
 ---@return integer added number of new phrases
-local function fill_up(phrases, variants, collector, simulation, state_set, center_note, frames_per_second, fine_steps)
+local function fill_up(
+  phrases,
+  variants,
+  collector,
+  simulation,
+  state_set,
+  center_note,
+  frames_per_second,
+  fine_steps,
+  tuning
+)
   local taken = {}
   for _, data in ipairs(phrases) do
     taken[data.note] = true
@@ -276,7 +289,7 @@ local function fill_up(phrases, variants, collector, simulation, state_set, cent
     end
     local direction = note < center_note and 'down' or 'up'
     if not taken[note] and not closed[direction] then
-      local data = PhraseBuilder.build(simulation, state_set, 1, note, frames_per_second, fine_steps)
+      local data = PhraseBuilder.build(simulation, state_set, 1, note, frames_per_second, fine_steps, tuning)
       data.simulation_index = 1
       if collect_phrase(collector, data, WaveStates.MAX_STATES) then
         phrases[#phrases + 1] = data
@@ -336,7 +349,7 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
   local per_octave = band_limited
   while true do
     phrases, variants =
-      build_phrases(simulations, state_set, simulation_by_offset, usage, frames_per_second, fine_steps)
+      build_phrases(simulations, state_set, simulation_by_offset, usage, frames_per_second, fine_steps, options.tuning)
     -- Phrases that switch samples start with a copy of their first sample, which gets a modulation set of its own
     -- (note start AHDSR, see `ReleaseWriter`); otherwise every sample starts a phrase.
     switching = not filter_side and phrases_switch_samples(phrases, variants)
@@ -393,7 +406,8 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
       state_set,
       usage.center_note,
       frames_per_second,
-      fine_steps
+      fine_steps,
+      options.tuning
     )
     Util.log(
       '%s: filled up with %d notes around %s (%d playable keys, %s..%s, %d samples)',
@@ -483,7 +497,8 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
   if filter_side then
     for index, key in ipairs(sample_keys) do
       local phrase = key.phrase
-      local envelope = FilterPath.envelope(simulations[phrase.simulation_index], filter_side, phrase.note)
+      local envelope =
+        FilterPath.envelope(simulations[phrase.simulation_index], filter_side, phrase.note, options.tuning)
       FilterWriter.write(
         target,
         target.samples[index],
