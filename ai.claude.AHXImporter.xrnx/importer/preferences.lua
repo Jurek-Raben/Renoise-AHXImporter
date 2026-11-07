@@ -32,6 +32,7 @@ local document = renoise.Document.create('AHXImporterPreferences') {
   lines_per_row = 0,
   crossfade_ms = Preferences.DEFAULT_CROSSFADE_MS,
   band_limit_roll_off = Preferences.DEFAULT_ROLL_OFF,
+  fill_notes = true,
 }
 
 -- ASSUMPTION: bundle_path ends with a path separator (handled either way).
@@ -60,6 +61,8 @@ end
 ---@field band_limit_roll_off number 0..1 share of the harmonics that fades out in band-limited rendering
 ---@field crossfade_ms integer 0..80 ms crossfade of phrase sample switches (0 = off)
 ---@field filter_resonance number 0..0.3, resonance of the Renoise filter path (share of the parameter range)
+---@field fill_notes boolean free phrase and sample slots get playable notes around the notes the song uses
+---@field target_bpm number|nil song BPM of this import, nil = the song's own (depends on the song, so never saved)
 
 ---The saved options.
 ---@return AhxImportOptions
@@ -74,6 +77,7 @@ function Preferences.load()
     lines_per_row = document.lines_per_row.value,
     crossfade_ms = document.crossfade_ms.value,
     band_limit_roll_off = document.band_limit_roll_off.value,
+    fill_notes = document.fill_notes.value,
   }
 end
 
@@ -89,6 +93,7 @@ function Preferences.save(options)
   document.lines_per_row.value = options.lines_per_row
   document.crossfade_ms.value = options.crossfade_ms
   document.band_limit_roll_off.value = options.band_limit_roll_off
+  document.fill_notes.value = options.fill_notes
   local ok, error_message = document:save_as(FILE_NAME)
   if not ok then
     Util.log('could not save %s: %s', FILE_NAME, tostring(error_message))
@@ -108,6 +113,7 @@ function Preferences.is_saved(options)
       and saved.lines_per_row == options.lines_per_row
       and saved.crossfade_ms == options.crossfade_ms
       and math.abs(saved.band_limit_roll_off - options.band_limit_roll_off) < 0.005
+      and saved.fill_notes == options.fill_notes
 end
 
 return Preferences

@@ -13,6 +13,10 @@ NoteUsage.NOTE_OFFSET = 11
 -- Used for instruments the song never triggers (still playable from the keyboard there).
 NoteUsage.DEFAULT_NOTE = 36
 
+-- Renoise notes of the AHX notes 1..60. Outside of them the period table clamps, so more keys would not sound higher.
+NoteUsage.FIRST_NOTE = NoteUsage.NOTE_OFFSET + 1
+NoteUsage.LAST_NOTE = NoteUsage.NOTE_OFFSET + 60
+
 ---@class AhxNoteVariant
 ---@field key string identifies the variant (`NoteUsage.variant_key`)
 ---@field note integer Renoise note
@@ -24,6 +28,44 @@ NoteUsage.DEFAULT_NOTE = 36
 ---@field notes integer[] sorted notes of plain triggers (never empty)
 ---@field variants AhxNoteVariant[] most used first
 ---@field square_offsets integer[] sorted distinct 9xx parameters
+---@field center_note integer weighted median of all triggered notes, inside the AHX note range (start of the fill up)
+
+---The note in the middle of all triggers (a single far away note does not move it, unlike the middle of the range).
+---@param counts table<integer, integer> number of triggers by note
+---@return integer center inside FIRST_NOTE..LAST_NOTE; DEFAULT_NOTE without triggers
+local function weighted_median(counts)
+  local notes, total = {}, 0
+  for note, count in pairs(counts) do
+    notes[#notes + 1] = note
+    total = total + count
+  end
+  table.sort(notes)
+  local center, sum = NoteUsage.DEFAULT_NOTE, 0
+  for _, note in ipairs(notes) do
+    sum = sum + counts[note]
+    if sum * 2 >= total then
+      center = note
+      break
+    end
+  end
+  return math.max(NoteUsage.FIRST_NOTE, math.min(NoteUsage.LAST_NOTE, center))
+end
+
+---All notes of the AHX note range by their distance to the center note, alternating above and below.
+---@param center_note integer
+---@return integer[]
+function NoteUsage.fill_order(center_note)
+  local order = { center_note }
+  for distance = 1, NoteUsage.LAST_NOTE - NoteUsage.FIRST_NOTE do
+    if center_note + distance <= NoteUsage.LAST_NOTE then
+      order[#order + 1] = center_note + distance
+    end
+    if center_note - distance >= NoteUsage.FIRST_NOTE then
+      order[#order + 1] = center_note - distance
+    end
+  end
+  return order
+end
 
 ---The slide periods without the trailing repeats of the last value; nil when there is no slide at all.
 ---@param slides integer[]
@@ -55,9 +97,11 @@ end
 ---@return table<integer, AhxInstrumentUsage> usage by AHX instrument number
 ---@return table<string, string> variant key by trigger id (plain triggers are missing)
 function NoteUsage.from_triggers(song, triggers)
-  local plain, variants, trigger_keys = {}, {}, {}
+  local plain, variants, trigger_keys, note_counts = {}, {}, {}, {}
   for _, trigger in ipairs(triggers) do
     local instrument = trigger.instrument
+    note_counts[instrument] = note_counts[instrument] or {}
+    note_counts[instrument][trigger.note] = (note_counts[instrument][trigger.note] or 0) + 1
     local slides = trimmed_slides(trigger.slides)
     if trigger.square_offset or slides then
       local key = NoteUsage.variant_key(trigger.note, trigger.square_offset, slides)
@@ -77,7 +121,12 @@ function NoteUsage.from_triggers(song, triggers)
 
   local result = {}
   for number = 1, song.instrument_count do
-    local usage = { notes = {}, variants = {}, square_offsets = {} }
+    local usage = {
+      notes = {},
+      variants = {},
+      square_offsets = {},
+      center_note = weighted_median(note_counts[number] or {}),
+    }
     for note in pairs(plain[number] or {}) do
       usage.notes[#usage.notes + 1] = note
     end

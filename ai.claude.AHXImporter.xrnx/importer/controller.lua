@@ -48,7 +48,7 @@ local function build_song(song, file_name, options)
     unsupported[name] = (unsupported[name] or 0) + 1
   end
 
-  local plan = Timing.plan(song)
+  local plan = Timing.with_bpm(Timing.plan(song), options.target_bpm)
   if not plan.exact then
     report('speed combination (rows approximated)')
   end

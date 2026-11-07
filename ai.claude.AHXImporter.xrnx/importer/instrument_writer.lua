@@ -3,8 +3,10 @@
 -- square offset (9xx) or a following pitch slide get extra variant phrases.
 
 local FilterPath = require('ahx.filter_path')
+local NoteUsage = require('ahx.note_usage')
 local PhraseBuilder = require('ahx.phrase_builder')
 local Simulator = require('ahx.simulator')
+local Timing = require('ahx.timing')
 local WaveStates = require('ahx.wave_states')
 local Waves = require('ahx.waves')
 local FilterWriter = require('importer.filter_writer')
@@ -55,7 +57,12 @@ local function fit_phrases(usage)
       for index = 1, kept do
         variants[index] = usage.variants[index]
       end
-      return { notes = notes, variants = variants, square_offsets = usage.square_offsets }
+      return {
+        notes = notes,
+        variants = variants,
+        square_offsets = usage.square_offsets,
+        center_note = usage.center_note,
+      }
     end
   end
   return usage
@@ -137,66 +144,153 @@ end
 ---@field phrase AhxPhraseData first phrase that uses the sample
 ---@field first boolean copy for the phrase's first line (note start set)
 ---@field top_note integer highest note the sample is played at (band limit)
+---@field locked boolean|nil belongs to the song: phrases added by the fill up do not change its band limit
 
----Distinct sample keys (waveform state + fine tune) of all phrases, in order of first use. With `per_phrase`, every
----phrase gets samples of its own (the Renoise-filter path needs a cutoff envelope per note). With `separate_first`,
----the sample of a phrase's first line is a copy of its own (marked `first`) with the note start set (see
----`ReleaseWriter.write_start`).
----@param phrases AhxPhraseData[]
----@param variants { data: AhxPhraseData }[]
----@param per_phrase boolean
----@param separate_first boolean
----@param per_octave boolean band-limited rendering: one sample per octave of the played note
----@return AhxSampleKey[]
-local function collect_sample_keys(phrases, variants, per_phrase, separate_first, per_octave)
-  local keys, by_key = {}, {}
-  local phrase_number = 0
-  local function collect(data)
-    phrase_number = phrase_number + 1
-    local current = nil
-    for index = 1, data.number_of_lines do
-      local line = data.lines[index]
-      if line and line.sample_key then
-        if line.glide and current then
-          -- A glide keeps the playing sample (no retrigger).
-          line.sample_key = current.key
-        else
-          if per_phrase then
-            line.sample_key = line.state_index .. ':' .. line.fine_index .. '#' .. phrase_number
-          end
-          if per_octave then
-            line.sample_key = line.sample_key .. '@' .. math.floor(line.note / 12)
-          end
-          local first = separate_first and index == 1
-          if first then
-            line.sample_key = line.sample_key .. '|first'
-          end
-          current = by_key[line.sample_key]
-          if not current then
-            current = {
-              key = line.sample_key,
-              state_index = line.state_index,
-              fine_index = line.fine_index,
-              phrase = data,
-              first = first,
-              top_note = line.note,
-            }
-            by_key[line.sample_key] = current
-            keys[#keys + 1] = current
-          end
+---@class AhxSampleCollector
+---@field keys AhxSampleKey[] distinct sample keys (waveform state + fine tune) in order of first use
+---@field by_key table<string, AhxSampleKey>
+---@field phrase_number integer
+---@field per_phrase boolean every phrase gets samples of its own (Renoise-filter path: a cutoff envelope per note)
+---@field separate_first boolean the sample of a phrase's first line is a copy of its own (marked `first`) with the note
+---start set (see `ReleaseWriter.write_start`)
+---@field per_octave boolean band-limited rendering: one sample per octave of the played note
+
+---Adds the sample keys of a phrase and rewrites the keys of its lines. When a limit is given and the keys exceed it,
+---the collector stays as it was and the phrase is unusable (the fill up then discards it).
+---@param collector AhxSampleCollector
+---@param data AhxPhraseData
+---@param limit integer|nil
+---@return boolean added
+local function collect_phrase(collector, data, limit)
+  local keys, by_key = collector.keys, collector.by_key
+  local first_new = #keys + 1
+  local previous_top_notes = {}
+  collector.phrase_number = collector.phrase_number + 1
+  local current = nil
+  for index = 1, data.number_of_lines do
+    local line = data.lines[index]
+    if line and line.sample_key then
+      if line.glide and current then
+        -- A glide keeps the playing sample (no retrigger).
+        line.sample_key = current.key
+      else
+        if collector.per_phrase then
+          line.sample_key = line.state_index .. ':' .. line.fine_index .. '#' .. collector.phrase_number
         end
-        -- Highest note the sample is played at (band limit).
+        if collector.per_octave then
+          line.sample_key = line.sample_key .. '@' .. math.floor(line.note / 12)
+        end
+        local first = collector.separate_first and index == 1
+        if first then
+          line.sample_key = line.sample_key .. '|first'
+        end
+        current = by_key[line.sample_key]
+        if not current then
+          current = {
+            key = line.sample_key,
+            state_index = line.state_index,
+            fine_index = line.fine_index,
+            phrase = data,
+            first = first,
+            top_note = line.note,
+          }
+          by_key[line.sample_key] = current
+          keys[#keys + 1] = current
+        end
+      end
+      -- Highest note the sample is played at (band limit).
+      if not current.locked then
+        previous_top_notes[current] = previous_top_notes[current] or current.top_note
         current.top_note = math.max(current.top_note, line.note)
       end
     end
   end
+
+  if limit and #keys > limit then
+    for index = #keys, first_new, -1 do
+      by_key[keys[index].key] = nil
+      keys[index] = nil
+    end
+    for key, top_note in pairs(previous_top_notes) do
+      key.top_note = top_note
+    end
+    return false
+  end
+  return true
+end
+
+---Collects the sample keys of all phrases of the song.
+---@param phrases AhxPhraseData[]
+---@param variants { data: AhxPhraseData }[]
+---@param per_phrase boolean
+---@param separate_first boolean
+---@param per_octave boolean
+---@return AhxSampleCollector
+local function collect_sample_keys(phrases, variants, per_phrase, separate_first, per_octave)
+  local collector = {
+    keys = {},
+    by_key = {},
+    phrase_number = 0,
+    per_phrase = per_phrase,
+    separate_first = separate_first,
+    per_octave = per_octave,
+  }
   for _, data in ipairs(phrases) do
-    collect(data)
+    collect_phrase(collector, data)
   end
   for _, variant in ipairs(variants) do
-    collect(variant.data)
+    collect_phrase(collector, variant.data)
   end
-  return keys
+  return collector
+end
+
+---Adds playable phrases for the keys the song does not use, from the center note outwards, as long as they fit into the
+---free phrase and sample slots. Everything the song needs is already settled and stays as it is: the samples keep their
+---indices and band limits, and the fine tune resolution and the note start / crossfade decision do not change. A note
+---that does not fit ends its direction, so the playable keys stay without gaps as far as possible.
+---A fill note can switch samples although the song's notes do not (the period table is coarser at high notes). It then
+---plays without crossfade and note start copies, like the rest of that instrument.
+---@param phrases AhxPhraseData[] gets the new phrases and stays sorted by note
+---@param variants { data: AhxPhraseData }[]
+---@param collector AhxSampleCollector
+---@param simulation AhxSimulation the plain note
+---@param state_set AhxWaveStateSet
+---@param center_note integer
+---@param frames_per_second number
+---@param fine_steps integer
+---@return integer added number of new phrases
+local function fill_up(phrases, variants, collector, simulation, state_set, center_note, frames_per_second, fine_steps)
+  local taken = {}
+  for _, data in ipairs(phrases) do
+    taken[data.note] = true
+  end
+  for _, key in ipairs(collector.keys) do
+    key.locked = true
+  end
+
+  local added = 0
+  local closed = {}
+  for _, note in ipairs(NoteUsage.fill_order(center_note)) do
+    if #phrases + #variants >= MAX_PHRASES then
+      break
+    end
+    local direction = note < center_note and 'down' or 'up'
+    if not taken[note] and not closed[direction] then
+      local data = PhraseBuilder.build(simulation, state_set, 1, note, frames_per_second, fine_steps)
+      data.simulation_index = 1
+      if collect_phrase(collector, data, WaveStates.MAX_STATES) then
+        phrases[#phrases + 1] = data
+        added = added + 1
+      else
+        closed[direction] = true
+      end
+      ProcessSlicer.step()
+    end
+  end
+  table.sort(phrases, function(a, b)
+    return a.note < b.note
+  end)
+  return added
 end
 
 ---Fills an empty Renoise instrument with an AHX instrument.
@@ -229,7 +323,7 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
   end
   local filter_side = FilterPath.analyze(simulations, instrument.wave_length, slides)
   local state_set = WaveStates.collect(simulations, instrument.wave_length, filter_side ~= nil)
-  local frames_per_second = 50 * plan.speed_multiplier
+  local frames_per_second = Timing.frames_per_second(plan)
   if filter_side then
     Util.log('%s: %s-pass filter sweep via Renoise filter', name, filter_side)
   end
@@ -237,7 +331,7 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
   -- Phrases first: they decide which waveform state / fine tune pairs are needed as samples. When there are more
   -- pairs than the phrase instrument column can address, the fine tune gets coarser.
   local fine_steps = FINE_STEPS_PER_SEMITONE
-  local phrases, variants, sample_keys, crossfade_ms, switching
+  local phrases, variants, collector, crossfade_ms, switching
   local band_limited = options.rendering == 3
   local per_octave = band_limited
   while true do
@@ -256,8 +350,8 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
     then
       crossfade_ms = options.crossfade_ms
     end
-    sample_keys = collect_sample_keys(phrases, variants, filter_side ~= nil, switching, per_octave)
-    if #sample_keys <= WaveStates.MAX_STATES then
+    collector = collect_sample_keys(phrases, variants, filter_side ~= nil, switching, per_octave)
+    if #collector.keys <= WaveStates.MAX_STATES then
       break
     end
     if fine_steps == 1 then
@@ -278,6 +372,31 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
   if fine_steps < FINE_STEPS_PER_SEMITONE then
     report('fine pitch resolution reduced (too many waveform states)')
   end
+
+  if options.fill_notes then
+    ProcessSlicer.step(('Instrument %02d: filling up with notes'):format(number))
+    local added = fill_up(
+      phrases,
+      variants,
+      collector,
+      simulations[1],
+      state_set,
+      usage.center_note,
+      frames_per_second,
+      fine_steps
+    )
+    Util.log(
+      '%s: filled up with %d notes around %s (%d playable keys, %s..%s, %d samples)',
+      name,
+      added,
+      PhraseWriter.note_name(usage.center_note),
+      #phrases,
+      PhraseWriter.note_name(phrases[1].note),
+      PhraseWriter.note_name(phrases[#phrases].note),
+      #collector.keys
+    )
+  end
+  local sample_keys = collector.keys
 
   target:clear()
   target.name = name

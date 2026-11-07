@@ -13,6 +13,8 @@ local function note_name(note)
   return NOTE_NAMES[note % 12 + 1] .. math.floor(note / 12)
 end
 
+PhraseWriter.note_name = note_name
+
 ---@param phrase renoise.InstrumentPhrase
 ---@param data AhxPhraseData
 local function write_lines(phrase, data)

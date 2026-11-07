@@ -120,7 +120,7 @@ end
 ---@param state_set AhxWaveStateSet
 ---@param simulation_index integer index of `simulation` in the state set
 ---@param trigger_note integer Renoise note the phrase plays
----@param frames_per_second number 50 · speed multiplier
+---@param frames_per_second number `Timing.frames_per_second`
 ---@param fine_steps integer fine tune steps per semitone (1 = semitones only)
 ---@param slides integer[]|nil track portamento period per frame from the trigger on (the last value holds)
 ---@return AhxPhraseData

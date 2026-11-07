@@ -1,6 +1,8 @@
 -- Import options dialog, shown before every import. It starts with the saved options; Save stores the current
 -- choice (the Save button shows a check mark while the choice equals the saved options). Return imports, Esc cancels.
+-- The target BPM starts with the song's own BPM and only applies to this import, so Save ignores it.
 
+local Timing = require('ahx.timing')
 local Preferences = require('importer.preferences')
 local Widgets = require('importer.ui.widgets')
 
@@ -36,6 +38,13 @@ local TOOLTIPS = {
     .. 'for fast vibratos. Auto picks the smallest resolution that fits all vibratos.',
   resonance = 'Resonance of the Renoise filter for filter sweeps that are played by the Renoise filter instead of '
     .. 'baked into the samples.',
+  fill_notes = 'After everything the song needs is created, the free phrase and sample slots of every instrument are '
+    .. 'filled with playable notes, from the middle of its used notes outwards. The song itself sounds the same. '
+    .. 'Importing takes longer and the song gets bigger. Vibrato, note volume and hard cut stay in the patterns, so '
+    .. 'keys played live do not have them.',
+  target_bpm = "Plays the song at another BPM. The pitch stays; the song and the instruments' modulation (pulse width, "
+    .. 'filter, envelopes, vibrato) get faster or slower together. Starts with the BPM of the song and applies to '
+    .. 'this import only.',
 }
 
 -- Index of the band-limited rendering in Preferences.RENDERINGS.
@@ -63,6 +72,8 @@ end
 function OptionsDialog.show(song, file_name, on_import, on_cancel)
   local vb = renoise.ViewBuilder()
   local options = Preferences.load()
+  local song_bpm = Timing.plan(song).bpm
+  local target_bpm = song_bpm
   local close
 
   local bit_depth_labels = {}
@@ -120,6 +131,8 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
       lines_per_row = options.lines_per_row,
       crossfade_ms = options.crossfade_ms,
       band_limit_roll_off = options.band_limit_roll_off,
+      fill_notes = options.fill_notes,
+      target_bpm = target_bpm,
     })
   end
 
@@ -262,7 +275,51 @@ function OptionsDialog.show(song, file_name, on_import, on_cancel)
         }
       ),
     }, CONTENT_WIDTH),
+    Widgets.section(vb, 'Instruments', {
+      Widgets.labeled(
+        vb,
+        'Fill up',
+        vb:row {
+          vb:checkbox {
+            tooltip = TOOLTIPS.fill_notes,
+            value = options.fill_notes,
+            notifier = function(value)
+              options.fill_notes = value
+              update_saved_mark()
+            end,
+          },
+          vb:text { text = 'with playable notes', style = 'disabled' },
+        }
+      ),
+    }, CONTENT_WIDTH),
     Widgets.section(vb, 'Patterns', {
+      Widgets.labeled(
+        vb,
+        'Target BPM',
+        vb:valuebox {
+          width = POPUP_WIDTH,
+          tooltip = TOOLTIPS.target_bpm,
+          min = Timing.MIN_BPM,
+          max = Timing.MAX_BPM,
+          value = target_bpm,
+          -- ASSUMPTION: a fractional value is shown and kept as it is (the definitions speak of natural numbers). The
+          -- import uses the exact song BPM as long as the box is not changed.
+          tostring = function(value)
+            return ('%g'):format(value)
+          end,
+          tonumber = function(text)
+            local value = tonumber(text)
+            return value and math.max(Timing.MIN_BPM, math.min(Timing.MAX_BPM, value))
+          end,
+          notifier = function(value)
+            target_bpm = value
+          end,
+        }
+      ),
+      vb:text {
+        text = ('Song: %g BPM. The pitch stays, the instruments follow the tempo.'):format(song_bpm),
+        style = 'disabled',
+      },
       Widgets.labeled(
         vb,
         'Resolution',

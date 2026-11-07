@@ -6,6 +6,9 @@
 --   phrase LPB = 3000 · speed multiplier / BPM   (one phrase line = one frame)
 --   song LPB   = phrase LPB / speed               (one pattern line = one AHX row)
 --   TPL        = speed                            (one tick = one frame)
+--
+-- A target BPM (import option) keeps all of these and only changes the BPM: the song and the instrument modulation get
+-- faster or slower together, the pitch stays. Everything that depends on real time uses `Timing.frames_per_second`.
 
 local Timing = {}
 
@@ -15,6 +18,9 @@ local MIN_BPM = 32
 local MAX_BPM = 999
 local MAX_TPL = 16
 local INITIAL_SPEED = 6
+
+Timing.MIN_BPM = MIN_BPM
+Timing.MAX_BPM = MAX_BPM
 
 ---@param a integer
 ---@param b integer
@@ -90,6 +96,29 @@ function Timing.plan(song)
 
   -- ASSUMPTION: transport.bpm accepts fractional values (only used when no integer BPM fits).
   return { bpm = best.bpm, phrase_lpb = best.phrase_lpb, speed_multiplier = multiplier, exact = true }
+end
+
+---The plan played at another BPM.
+---@param plan AhxTimingPlan
+---@param bpm number|nil nil keeps the plan's BPM
+---@return AhxTimingPlan
+function Timing.with_bpm(plan, bpm)
+  if not bpm then
+    return plan
+  end
+  return {
+    bpm = bpm,
+    phrase_lpb = plan.phrase_lpb,
+    speed_multiplier = plan.speed_multiplier,
+    exact = plan.exact,
+  }
+end
+
+---AHX frames per second as played: one phrase line is one frame (50 · speed multiplier at the song's own BPM).
+---@param plan AhxTimingPlan
+---@return number
+function Timing.frames_per_second(plan)
+  return plan.bpm * plan.phrase_lpb / 60
 end
 
 ---Song LPB and TPL for a speed. With `lines_per_row` > 1 one AHX row spans several pattern lines (pattern
