@@ -334,6 +334,7 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
   local phrases, variants, collector, crossfade_ms, switching
   local band_limited = options.rendering == 3
   local per_octave = band_limited
+  local start_copies = true
   while true do
     phrases, variants =
       build_phrases(simulations, state_set, simulation_by_offset, usage, frames_per_second, fine_steps)
@@ -350,20 +351,34 @@ function InstrumentWriter.write(target, song, number, plan, usage, report, optio
     then
       crossfade_ms = options.crossfade_ms
     end
-    collector = collect_sample_keys(phrases, variants, filter_side ~= nil, switching, per_octave)
+    collector = collect_sample_keys(phrases, variants, filter_side ~= nil, switching and start_copies, per_octave)
     if #collector.keys <= WaveStates.MAX_STATES then
       break
     end
-    if fine_steps == 1 then
-      if not per_octave then
-        break
+    if fine_steps == 1 and not per_octave then
+      -- The note start copies come on top of the waveform states, which can already use up the limit (filter sweep
+      -- with PWM). Make room with a coarser filter resolution; the last resort are phrases that start without copies
+      -- (the note start then fades in with the PWM crossfade).
+      local overflow = #collector.keys - WaveStates.MAX_STATES
+      local coarser =
+        WaveStates.collect(simulations, instrument.wave_length, filter_side ~= nil, #state_set.states - overflow)
+      if #coarser.states < #state_set.states then
+        state_set = coarser
+      elseif start_copies then
+        start_copies = false
+        report('note start samples (too many waveform states)')
+      else
+        error(('Instrument %02d needs more than %d samples'):format(number, WaveStates.MAX_STATES))
       end
-      -- Band-limited per octave does not fit: one band limit per sample (for its highest note) instead.
-      per_octave = false
-      fine_steps = FINE_STEPS_PER_SEMITONE * 2
-      report('band-limited rendering per octave reduced (too many samples)')
+    else
+      if fine_steps == 1 then
+        -- Band-limited per octave does not fit: one band limit per sample (for its highest note) instead.
+        per_octave = false
+        fine_steps = FINE_STEPS_PER_SEMITONE * 2
+        report('band-limited rendering per octave reduced (too many samples)')
+      end
+      fine_steps = fine_steps / 2
     end
-    fine_steps = fine_steps / 2
     ProcessSlicer.step(('Instrument %02d: reducing fine tune'):format(number))
   end
   if #variants < variant_count then

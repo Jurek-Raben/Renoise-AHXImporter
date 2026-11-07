@@ -83,11 +83,13 @@ end
 ---@param simulations AhxSimulation[]
 ---@param wave_length integer
 ---@param ignore_filter boolean|nil unfiltered states only (the Renoise filter does the filter, see `FilterPath`)
+---@param max_states integer|nil at most this many states if the filter resolution allows it (default MAX_STATES)
 ---@return AhxWaveStateSet
-function WaveStates.collect(simulations, wave_length, ignore_filter)
+function WaveStates.collect(simulations, wave_length, ignore_filter, max_states)
+  max_states = max_states or WaveStates.MAX_STATES
   local step = 1
   local result = collect_with_step(simulations, wave_length, step, ignore_filter == true)
-  while #result.states > WaveStates.MAX_STATES and step < 31 do
+  while #result.states > max_states and step < 31 do
     step = step + 1
     result = collect_with_step(simulations, wave_length, step, ignore_filter == true)
   end
